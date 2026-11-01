@@ -53,23 +53,65 @@ def fmt_table(df: pd.DataFrame, fmt: dict) -> "pd.io.formats.style.Styler":
     return df.style.format(fmt, na_rep="–")
 
 
+ACCOUNTS_FILE = "serviceaccounts.txt"  # local, git-ignored: "klant = sa@project.iam.gserviceaccount.com"
+
+
+def load_accounts() -> dict[str, str]:
+    """Known service accounts per client from serviceaccounts.txt (optional)."""
+    out = {}
+    try:
+        with open(ACCOUNTS_FILE, encoding="utf-8") as fh:
+            for ln in fh:
+                ln = ln.strip()
+                if ln and not ln.startswith("#") and "=" in ln:
+                    name, email = ln.split("=", 1)
+                    out[name.strip()] = email.strip()
+    except FileNotFoundError:
+        pass
+    return out
+
+
 def service_account_ui() -> None:
-    """Sidebar block: load a service-account key for the GSC API (kept in memory only)."""
-    with st.sidebar.expander("🔑 Serviceaccount (GSC API)", expanded="creds" not in ss):
-        up = st.file_uploader("Sleutel (JSON)", type=["json"], key="sa_upload")
-        default_path = os.environ.get("GOOGLE_APPLICATION_CREDENTIALS", "credentials/service-account.json")
-        path = st.text_input("…of pad naar sleutel", value=default_path)
-        if st.button("Laden", use_container_width=True):
-            from core import gsc_api
+    """Sidebar block: log in for the GSC API. Default: gcloud login on this machine,
+    acting as a chosen service account (no key file). Fallback: a JSON key."""
+    from core import gsc_api
+
+    with st.sidebar.expander("🔑 Inloggen (GSC API)", expanded="creds" not in ss):
+        method = st.radio("Methode", ["gcloud-login", "JSON-key"], horizontal=True, key="auth_method",
+                          help="gcloud-login: één keer `gcloud auth application-default login`, geen sleutelbestanden. "
+                               "JSON-key: voor plekken zonder gcloud.")
+        creds_fn = None
+        sa = None
+        if method == "gcloud-login":
+            accounts = load_accounts()
+            choice = st.selectbox("Handelen als", ["(eigen gcloud-account)", *accounts, "(ander serviceaccount…)"],
+                                  help=f"Klanten en serviceaccounts staan in {ACCOUNTS_FILE}.")
+            if choice == "(ander serviceaccount…)":
+                sa = st.text_input("Serviceaccount", placeholder="seo@klant-project.iam.gserviceaccount.com").strip() or None
+            elif choice != "(eigen gcloud-account)":
+                sa = accounts[choice]
+                st.caption(sa)
+            creds_fn = lambda: gsc_api.credentials_from_gcloud(sa)  # noqa: E731
+        else:
+            up = st.file_uploader("Sleutel (JSON)", type=["json"], key="sa_upload")
+            default_path = os.environ.get("GOOGLE_APPLICATION_CREDENTIALS", "credentials/service-account.json")
+            path = st.text_input("…of pad naar sleutel", value=default_path)
+            creds_fn = lambda: gsc_api.credentials_from_json(up.getvalue()) if up else gsc_api.credentials_from_file(path)  # noqa: E731
+
+        if st.button("Verbinden", use_container_width=True):
             try:
-                ss.creds = gsc_api.credentials_from_json(up.getvalue()) if up else gsc_api.credentials_from_file(path)
+                ss.creds = creds_fn()
                 ss.sites = gsc_api.list_sites(ss.creds)
-                st.success(f"{ss.creds.service_account_email}: {len(ss.sites)} propert{'y' if len(ss.sites) == 1 else 'ies'}")
+                n = len(ss.sites)
+                st.success(f"Verbonden: {n} propert{'y' if n == 1 else 'ies'} zichtbaar.")
+                if n == 0:
+                    st.info("Geen properties. Voeg het account toe in Search Console (Instellingen → Gebruikers en rechten).")
             except Exception as exc:  # noqa: BLE001
-                st.error(f"Laden mislukt: {exc}")
+                ss.pop("creds", None)
+                st.error(gsc_api.explain_error(exc, sa))
         if "creds" in ss:
-            st.caption(f"Actief: {ss.creds.service_account_email}")
-        st.caption("De sleutel blijft alleen in het geheugen van deze sessie.")
+            st.caption(f"Actief: {getattr(ss.creds, 'service_account_email', '')}")
+        st.caption("Er wordt niets opgeslagen; de login geldt voor deze sessie.")
 
 
 def filters_ui(prefix: str, defaults: dict, pre_label: str) -> tuple[sb.SourceFilters, list]:
@@ -151,7 +193,7 @@ def paste_or_upload(key: str, help_text: str) -> pd.DataFrame | None:
 def fetch_api(f: sb.SourceFilters, key: str) -> pd.DataFrame | None:
     from core import gsc_api
     if "creds" not in ss:
-        st.info("Laad eerst een serviceaccount-sleutel in de zijbalk.")
+        st.info("Log eerst in via de zijbalk (🔑 Inloggen).")
         return None
     site = st.selectbox("Property", ss.get("sites", []), key=f"{key}_site")
     fresh = st.checkbox("Ook verse (nog niet definitieve) data", key=f"{key}_fresh",

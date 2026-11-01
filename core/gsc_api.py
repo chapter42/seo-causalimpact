@@ -1,7 +1,8 @@
-"""Search Console API access with a service account.
+"""Search Console API access: gcloud login (with service-account impersonation)
+or a service-account JSON key.
 
-The service account needs (restricted) access to the property in Search
-Console. Data comes back as url × day in the internal long format.
+The account the app acts as needs (restricted) access to the property in
+Search Console. Data comes back as url × day in the internal long format.
 """
 
 from __future__ import annotations
@@ -28,6 +29,67 @@ def credentials_from_json(raw: str | bytes | dict):
 def credentials_from_file(path: str):
     with open(path, "rb") as fh:
         return credentials_from_json(fh.read())
+
+
+class LoginError(RuntimeError):
+    """Login failed with a fix the user can act on."""
+
+
+def credentials_from_gcloud(service_account: str | None = None):
+    """Use the gcloud login on this machine (Application Default Credentials).
+
+    With `service_account`, the app acts as that service account through
+    impersonation: no key file, a short-lived token (1 hour). This needs the
+    role Service Account Token Creator for the logged-in user on that account.
+    Without it, the app acts as the logged-in user; then the login must include
+    the Search Console scope.
+    """
+    import google.auth
+    from google.auth import impersonated_credentials
+    from google.auth.exceptions import DefaultCredentialsError
+
+    try:
+        source, _ = google.auth.default(scopes=["https://www.googleapis.com/auth/cloud-platform"])
+    except DefaultCredentialsError as exc:
+        raise LoginError(
+            "Geen gcloud-login gevonden op deze computer. Draai eerst:\n"
+            "gcloud auth application-default login"
+        ) from exc
+
+    if not service_account:
+        user, _ = google.auth.default(scopes=SCOPES)
+        user.service_account_email = getattr(user, "account", None) or "eigen gcloud-account"
+        return user
+
+    creds = impersonated_credentials.Credentials(
+        source_credentials=source,
+        target_principal=service_account.strip(),
+        target_scopes=SCOPES,
+        lifetime=3600,
+    )
+    return creds  # exposes .service_account_email (the target principal)
+
+
+def explain_error(exc: Exception, service_account: str | None = None) -> str:
+    """Turn common Google auth errors into a Dutch fix."""
+    msg = str(exc)
+    if isinstance(exc, LoginError):
+        return msg
+    if service_account and ("iam.serviceAccounts.getAccessToken" in msg or "PERMISSION_DENIED" in msg):
+        return (
+            f"Je gcloud-account mag {service_account} niet gebruiken. Geef jezelf eenmalig die rol:\n"
+            f"gcloud iam service-accounts add-iam-policy-binding {service_account} "
+            "--member=\"user:JOUW_EMAIL\" --role=\"roles/iam.serviceAccountTokenCreator\""
+        )
+    if "insufficient" in msg.lower() and "scope" in msg.lower():
+        return (
+            "Je gcloud-login mist het Search Console-recht. Kies een serviceaccount, of log opnieuw in met:\n"
+            "gcloud auth application-default login --scopes="
+            "https://www.googleapis.com/auth/webmasters.readonly,https://www.googleapis.com/auth/cloud-platform"
+        )
+    if "has not been used" in msg or "SERVICE_DISABLED" in msg:
+        return "De Search Console API staat uit in het project. Zet hem aan met:\ngcloud services enable searchconsole.googleapis.com"
+    return msg
 
 
 def _service(creds):

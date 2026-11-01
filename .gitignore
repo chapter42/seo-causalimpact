@@ -6,3 +6,4 @@ credentials/
 *.json.key
 service-account*.json
 .DS_Store
+serviceaccounts.txt

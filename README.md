@@ -23,9 +23,28 @@ pip install -r requirements-tf.txt
 
 Zonder die stap werkt alles met het statsmodels-model.
 
-## Serviceaccount (GSC API)
+## Inloggen voor de GSC API
 
-Upload de JSON-sleutel in de zijbalk, of zet het pad in `GOOGLE_APPLICATION_CREDENTIALS`. Het account heeft in Search Console minimaal beperkte toegang tot de property nodig. De sleutel blijft alleen in het geheugen van de sessie.
+Alleen nodig voor de bron *GSC API*. De BigQuery-route (query draaien, resultaat plakken) werkt zonder inloggen.
+
+**Lokaal: gcloud-login (aanbevolen, geen sleutelbestanden)**
+
+1. Eenmalig: installeer gcloud (`brew install --cask google-cloud-sdk`) en log in:
+   ```bash
+   gcloud auth login
+   gcloud auth application-default login
+   ```
+2. Per klant: maak een serviceaccount waar jij als mag handelen:
+   ```bash
+   bash scripts/nieuwe-klant.sh <gcp-project-id> <klantnaam>
+   ```
+   Het script zet de API's aan, maakt `seo-<klant>@<project>.iam.gserviceaccount.com`, geeft jou de rol *Service Account Token Creator* en zet de klant in `serviceaccounts.txt`.
+3. Voeg dat serviceaccount in Search Console toe aan de property van de klant (recht: Beperkt).
+4. In de app: 🔑 Inloggen → *gcloud-login* → kies de klant → *Verbinden*.
+
+De app vraagt namens het serviceaccount een token aan dat een uur geldig is. Er staat nergens een sleutel op schijf.
+
+**Zonder gcloud: JSON-key.** Kies *JSON-key* en upload de sleutel, of zet het pad in `GOOGLE_APPLICATION_CREDENTIALS`. De sleutel blijft alleen in het geheugen van de sessie.
 
 ## Stap 1 · Groepen maken
 
@@ -89,6 +108,7 @@ core/grouping.py        stratificatie, toewijzing, balanstoetsen
 core/impact.py          CausalImpact (statsmodels + tfcausalimpact), placebo, grafiek
 core/_tfci_worker.py    tfcausalimpact in een apart proces
 core/sql_builder.py     BigQuery-queries voor stap 1 en 2
-core/gsc_api.py         Search Console API met serviceaccount
+core/gsc_api.py         Search Console API: gcloud-login of JSON-key
 core/data_io.py         plakken/uploaden, normaliseren, NL-getalnotatie, demodata
+scripts/nieuwe-klant.sh serviceaccount per klant, zonder key
 ```

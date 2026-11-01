@@ -104,3 +104,27 @@ def test_app_paste_bigquery_group_result():
     at.button[[b.label for b in at.button].index("▶︎ Analyse draaien")].click().run()
     assert not at.exception
     assert "De testgroep haalde" in " ".join(mk.value for mk in at.markdown)
+
+
+def test_gcloud_login_errors_and_impersonation(monkeypatch):
+    import google.auth
+    import google.oauth2.credentials as oc
+    from google.auth.exceptions import DefaultCredentialsError
+    from core import gsc_api
+
+    def no_login(*a, **k):
+        raise DefaultCredentialsError("none")
+
+    monkeypatch.setattr(google.auth, "default", no_login)
+    try:
+        gsc_api.credentials_from_gcloud("seo-x@p.iam.gserviceaccount.com")
+        raise AssertionError("expected LoginError")
+    except gsc_api.LoginError as exc:
+        assert "gcloud auth application-default login" in str(exc)
+
+    monkeypatch.setattr(google.auth, "default", lambda *a, **k: (oc.Credentials(token="t"), "p"))
+    creds = gsc_api.credentials_from_gcloud("seo-x@p.iam.gserviceaccount.com")
+    assert creds.service_account_email == "seo-x@p.iam.gserviceaccount.com"
+
+    msg = gsc_api.explain_error(Exception("PERMISSION_DENIED: iam.serviceAccounts.getAccessToken"), "seo-x@p.iam.gserviceaccount.com")
+    assert "serviceAccountTokenCreator" in msg
