@@ -51,10 +51,17 @@ def credentials_from_gcloud(service_account: str | None = None):
     try:
         source, _ = google.auth.default(scopes=["https://www.googleapis.com/auth/cloud-platform"])
     except DefaultCredentialsError as exc:
-        raise LoginError(
+        import os
+
+        env = os.environ.get("GOOGLE_APPLICATION_CREDENTIALS")
+        hint = (
+            f"GOOGLE_APPLICATION_CREDENTIALS verwijst naar {env}, en Google zoekt daar eerst. "
+            "Haal die weg met: unset GOOGLE_APPLICATION_CREDENTIALS (en start de app opnieuw)."
+            if env else
             "Geen gcloud-login gevonden op deze computer. Draai eerst:\n"
             "gcloud auth application-default login"
-        ) from exc
+        )
+        raise LoginError(f"{hint}\n\nOorzaak volgens Google: {exc}") from exc
 
     if not service_account:
         user, _ = google.auth.default(scopes=SCOPES)
