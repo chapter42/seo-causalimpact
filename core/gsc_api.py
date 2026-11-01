@@ -13,7 +13,10 @@ from typing import Callable
 
 import pandas as pd
 
-SCOPES = ["https://www.googleapis.com/auth/webmasters.readonly"]
+SCOPES = [
+    "https://www.googleapis.com/auth/webmasters.readonly",
+    "https://www.googleapis.com/auth/cloud-platform",  # BigQuery: find GSC exports
+]
 ROW_LIMIT = 25_000
 
 
@@ -95,7 +98,9 @@ def explain_error(exc: Exception, service_account: str | None = None) -> str:
             "https://www.googleapis.com/auth/webmasters.readonly,https://www.googleapis.com/auth/cloud-platform"
         )
     if "has not been used" in msg or "SERVICE_DISABLED" in msg:
-        return "De Search Console API staat uit in het project. Zet hem aan met:\ngcloud services enable searchconsole.googleapis.com"
+        api = "bigquery.googleapis.com" if "bigquery" in msg.lower() else "searchconsole.googleapis.com"
+        return ("Een API staat uit in je quotaproject. Zet hem aan met:\n"
+                f"gcloud services enable {api} --project JOUW_QUOTAPROJECT\n\n{msg}")
     return msg
 
 

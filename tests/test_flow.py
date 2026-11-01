@@ -128,3 +128,69 @@ def test_gcloud_login_errors_and_impersonation(monkeypatch):
 
     msg = gsc_api.explain_error(Exception("PERMISSION_DENIED: iam.serviceAccounts.getAccessToken"), "seo-x@p.iam.gserviceaccount.com")
     assert "serviceAccountTokenCreator" in msg
+
+
+class _Req:
+    def __init__(self, resp=None, exc=None):
+        self.resp, self.exc = resp, exc
+
+    def execute(self):
+        if self.exc:
+            raise self.exc
+        return self.resp
+
+
+class _FakeBQ:
+    """Minimal stand-in for the BigQuery v2 discovery client."""
+
+    def __init__(self):
+        from googleapiclient.errors import HttpError
+        import httplib2
+        self.not_found = HttpError(httplib2.Response({"status": 404}), b"not found")
+
+    def projects(self):
+        return self
+
+    def datasets(self):
+        return self
+
+    def tables(self):
+        return self
+
+    def list(self, projectId=None, maxResults=None):
+        if projectId is None:
+            return _Req({"projects": [{"projectReference": {"projectId": p}} for p in ["gsc-export-a", "leeg"]]})
+        if projectId == "gsc-export-a":
+            return _Req({"datasets": [{"datasetReference": {"datasetId": d}, "location": "EU"} for d in ["searchconsole", "ga4"]]})
+        return _Req({"datasets": []})
+
+    def list_next(self, req, resp):
+        return None
+
+    def get(self, projectId, datasetId, tableId):
+        if datasetId == "searchconsole":
+            return _Req({"numRows": "1234"})
+        return _Req(exc=self.not_found)
+
+
+def test_bigquery_export_discovery():
+    from core import bq_discovery
+    found = bq_discovery.list_gsc_exports(None, svc=_FakeBQ())
+    assert [f["table"] for f in found] == ["gsc-export-a.searchconsole.searchdata_url_impression"]
+    assert found[0]["rows"] == 1234
+
+
+def test_app_sidebar_pickers():
+    at = AppTest.from_file(APP, default_timeout=60)
+    at.session_state["creds"] = type("C", (), {"service_account_email": "roy@chapter42.com"})()
+    at.session_state["sites"] = ["sc-domain:voorbeeld.nl", "https://www.voorbeeld.nl/"]
+    at.session_state["bq_exports"] = [{"project": "gsc-export-a", "dataset": "searchconsole",
+                                       "table": "gsc-export-a.searchconsole.searchdata_url_impression",
+                                       "rows": 1234, "location": "EU"}]
+    at.run()
+    assert not at.exception
+    at.selectbox(key="bq_table").set_value("gsc-export-a.searchconsole.searchdata_url_impression").run()
+    assert any("gsc-export-a.searchconsole" in t.value for t in at.text_input)
+    at.radio(key="g_source").set_value("GSC API (serviceaccount)").run()
+    assert not at.exception
+    assert any("sc-domain:voorbeeld.nl" in c.value for c in at.caption)

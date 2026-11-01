@@ -41,6 +41,7 @@ Alleen nodig voor de bron *GSC API*. De BigQuery-route (query draaien, resultaat
    Het script zet de API's aan, maakt `seo-<klant>@<project>.iam.gserviceaccount.com`, geeft jou de rol *Service Account Token Creator* en zet de klant in `serviceaccounts.txt`.
 3. Voeg dat serviceaccount in Search Console toe aan de property van de klant (recht: Beperkt).
 4. In de app: 🔑 Inloggen → *gcloud-login* → kies de klant → *Verbinden*.
+5. Na *Verbinden* kies je in de zijbalk de **property** (voor de bron GSC API) en de **BigQuery-export** (de app zoekt alle datasets met `searchdata_url_impression`; dat zijn alleen metadata-aanroepen, zonder kosten).
 
 De app vraagt namens het serviceaccount een token aan dat een uur geldig is. Er staat nergens een sleutel op schijf.
 

@@ -102,16 +102,39 @@ def service_account_ui() -> None:
             try:
                 ss.creds = creds_fn()
                 ss.sites = gsc_api.list_sites(ss.creds)
-                n = len(ss.sites)
-                st.success(f"Verbonden: {n} propert{'y' if n == 1 else 'ies'} zichtbaar.")
-                if n == 0:
-                    st.info("Geen properties. Voeg het account toe in Search Console (Instellingen → Gebruikers en rechten).")
             except Exception as exc:  # noqa: BLE001
                 ss.pop("creds", None)
                 st.error(gsc_api.explain_error(exc, sa))
+            else:
+                ss.bq_exports, ss.bq_error = [], None
+                box = st.empty()
+                try:
+                    from core import bq_discovery
+                    ss.bq_exports = bq_discovery.list_gsc_exports(ss.creds, progress=lambda m: box.caption(m))
+                except Exception as exc:  # noqa: BLE001
+                    ss.bq_error = gsc_api.explain_error(exc, sa)
+                box.empty()
         if "creds" in ss:
             st.caption(f"Actief: {getattr(ss.creds, 'service_account_email', '')}")
         st.caption("Er wordt niets opgeslagen; de login geldt voor deze sessie.")
+
+    if "creds" in ss:
+        sites = ss.get("sites", [])
+        st.sidebar.selectbox(
+            f"Property ({len(sites)})", sites, key="site",
+            help="Gebruikt door de bron GSC API in stap 1 en 2.",
+        )
+        if not sites:
+            st.sidebar.caption("Voeg het account toe in Search Console (Instellingen → Gebruikers en rechten).")
+        exports = ss.get("bq_exports", [])
+        labels = {e["table"]: f"{e['project']} · {e['dataset']} ({nl(e['rows'])} rijen)" for e in exports}
+        st.sidebar.selectbox(
+            f"BigQuery-export ({len(exports)})", ["", *labels], key="bq_table",
+            format_func=lambda t: labels.get(t, "(zelf invullen)"),
+            help="Datasets met een GSC-bulkexport. Vult het tabelveld bij de bron BigQuery.",
+        )
+        if ss.get("bq_error"):
+            st.sidebar.caption("BigQuery doorzoeken lukte niet: " + ss.bq_error.splitlines()[0])
 
 
 def filters_ui(prefix: str, defaults: dict, pre_label: str) -> tuple[sb.SourceFilters, list]:
@@ -195,7 +218,11 @@ def fetch_api(f: sb.SourceFilters, key: str) -> pd.DataFrame | None:
     if "creds" not in ss:
         st.info("Log eerst in via de zijbalk (🔑 Inloggen).")
         return None
-    site = st.selectbox("Property", ss.get("sites", []), key=f"{key}_site")
+    site = ss.get("site")
+    if site:
+        st.caption(f"Property: **{site}** (wijzigen in de zijbalk)")
+    else:
+        st.warning("Kies eerst een property in de zijbalk.")
     fresh = st.checkbox("Ook verse (nog niet definitieve) data", key=f"{key}_fresh",
                         help="Standaard alleen definitieve data; verse data van de laatste dagen kan nog wijzigen.")
     if st.button("Ophalen via GSC API", key=f"{key}_go", type="primary", disabled=not site):
@@ -214,7 +241,7 @@ def fetch_api(f: sb.SourceFilters, key: str) -> pd.DataFrame | None:
         if long.empty:
             st.warning("Geen data. Check property, periode en patronen.")
             return None
-        ss[f"{key}_site_used"] = site
+        ss[f"{key}_site_used"] = site  # stored in testconfig.json
         return dio.to_period(long, f.granularity)
     return None
 
@@ -240,7 +267,9 @@ def step_groups() -> None:
                       horizontal=True, key="g_source")
     defaults = default_filters()
     if source.startswith("BigQuery"):
-        defaults["table"] = st.text_input("Tabel (project.dataset of volledige tabel)", value=ss.get("g_table", defaults["table"]), key="g_table")
+        chosen = ss.get("bq_table") or ""
+        defaults["table"] = st.text_input("Tabel (project.dataset of volledige tabel)", value=chosen or defaults["table"],
+                                          key=f"g_table_{chosen}", help="Kies een export in de zijbalk, of typ hem hier.")
         defaults["min_impressions"] = st.number_input("Minimaal vertoningen per url in de query", 0, value=100, step=50, key="g_minimp")
     try:
         f, page_types = filters_ui("g_", defaults, "Pre-periode")
@@ -430,7 +459,13 @@ def step_analysis() -> None:
                       horizontal=True, key="a_source")
     defaults = default_filters(cfg, analysis=True)
     if source.startswith("BigQuery"):
-        defaults["table"] = st.text_input("Tabel", value=defaults["table"], key="a_table")
+        placeholder = default_filters()["table"]
+        table_default = defaults["table"] if defaults["table"] != placeholder else (ss.get("bq_table") or placeholder)
+        defaults["table"] = st.text_input("Tabel", value=table_default, key=f"a_table_{table_default}")
+    cfg_prop = (cfg or {}).get("bron", {}).get("property")
+    if source.startswith("GSC") and cfg_prop and cfg_prop != ss.get("site") and cfg_prop in ss.get("sites", []):
+        st.button(f"Gebruik de property uit de testconfig: {cfg_prop}",
+                  on_click=lambda: ss.__setitem__("site", cfg_prop))
     try:
         f, _ = filters_ui("a_", defaults, "Analyseperiode")
     except ValueError as exc:
