@@ -212,3 +212,14 @@ def test_stale_env_key_is_ignored_for_gcloud(monkeypatch):
     monkeypatch.setattr(google.auth, "default", fake_default)
     gsc_api.credentials_from_gcloud(None)
     assert seen["env"] is None
+
+
+def test_grouping_sql_shape():
+    # Validated with BigQuery dry runs (Nov 2026). Guards against the old
+    # QUALIFY SUM(SUM()) form, which BigQuery rejects.
+    f = sb.SourceFilters(table="p.d", start=date(2026, 8, 6), end=date(2026, 10, 29),
+                         include_patterns=["it's", "/blog/"], exclude_patterns=["/p/"], min_impressions=100)
+    sql = sb.grouping_sql(f)
+    assert "QUALIFY" not in sql and "SUM(SUM(" not in sql
+    assert "HAVING SUM(impressions) >= 100" in sql
+    assert "r'/blog/'" in sql and "r\"it's\"" in sql and "'''" not in sql

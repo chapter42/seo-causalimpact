@@ -36,9 +36,13 @@ class SourceFilters:
 
 
 def _raw(p: str) -> str:
-    if "'''" in p:
-        raise ValueError(f"Patroon bevat ''' en kan niet in SQL: {p}")
-    return f"r'''{p}'''"
+    """Regex as a BigQuery raw string: r'...', or with double quotes when the
+    pattern itself contains a single quote."""
+    if "'" not in p:
+        return f"r'{p}'"
+    if '"' not in p:
+        return f'r"{p}"'
+    raise ValueError(f"Patroon bevat zowel ' als \" en kan niet in SQL: {p}")
 
 
 def _str(s: str) -> str:
@@ -67,13 +71,12 @@ def _period(f: SourceFilters) -> str:
 
 def grouping_sql(f: SourceFilters) -> str:
     """url × period for the pre-period: input for building the groups."""
-    having = (
-        f"\nQUALIFY SUM(SUM(impressions)) OVER (PARTITION BY url) >= {int(f.min_impressions)}"
-        if f.min_impressions else ""
+    head = (
+        "-- Stap 1: url-data voor de groepsindeling (pre-periode)\n"
+        "-- Draai in BigQuery en plak het resultaat terug, of download als CSV.\n"
     )
-    return f"""-- Stap 1: url-data voor de groepsindeling (pre-periode)
--- Draai in BigQuery en plak het resultaat terug, of download als CSV.
-SELECT
+    if not f.min_impressions:
+        return head + f"""SELECT
   url,
   {_period(f)} AS date,
   SUM(clicks) AS clicks,
@@ -81,7 +84,31 @@ SELECT
   SUM(sum_position) AS sum_position
 FROM `{f.full_table()}`
 WHERE {_where(f)}
-GROUP BY url, date{having}
+GROUP BY url, date
+ORDER BY url, date"""
+    # Minimum per url: first sum per url × period, then keep urls above the bar.
+    # (An aggregate inside a window in QUALIFY is not allowed in BigQuery.)
+    where = _where(f)
+    return head + f"""WITH daily AS (
+  SELECT
+    url,
+    {_period(f)} AS date,
+    SUM(clicks) AS clicks,
+    SUM(impressions) AS impressions,
+    SUM(sum_position) AS sum_position
+  FROM `{f.full_table()}`
+  WHERE {where}
+  GROUP BY url, date
+),
+urls AS (
+  SELECT url
+  FROM daily
+  GROUP BY url
+  HAVING SUM(impressions) >= {int(f.min_impressions)}
+)
+SELECT daily.*
+FROM daily
+JOIN urls USING (url)
 ORDER BY url, date"""
 
 
