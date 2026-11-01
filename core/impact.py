@@ -61,8 +61,10 @@ def build_model_frame(
         raise ValueError("Start van de meetperiode ligt vóór de livegang.")
     pre = data[data.index < t0]
     post = data[data.index >= t1]
-    if len(pre) < 14:
-        raise ValueError(f"Te weinig pre-periode ({len(pre)} punten). Minimaal 14, liefst 8+ weken dagdata.")
+    need = min_pre_points(data.index)
+    if len(pre) < need:
+        unit = "dagen" if _is_daily(data.index) else "weken"
+        raise ValueError(f"Te weinig pre-periode ({len(pre)} {unit}). Minimaal {need} {unit} nodig.")
     if len(post) < 3:
         raise ValueError("Te weinig data na de livegang (minimaal 3 punten).")
     gap = len(data) - len(pre) - len(post)
@@ -71,6 +73,11 @@ def build_model_frame(
         if gap % 7 and _is_daily(data.index):
             notes.append("Het uitrolvenster is geen veelvoud van 7 dagen; het weekpatroon schuift daardoor iets op.")
     return pd.concat([pre, post]), len(pre), notes
+
+
+def min_pre_points(idx: pd.Index) -> int:
+    """Minimum pre-period length: 14 days, or 8 weeks for weekly data."""
+    return 14 if _is_daily(idx) else 8
 
 
 def _is_daily(idx: pd.Index) -> bool:
@@ -149,20 +156,26 @@ def _fit_and_simulate(y_pre: np.ndarray, X_pre: np.ndarray, X_future: np.ndarray
     return res, np.asarray(sims).reshape(len(X_future), -1) * scale, scale
 
 
-def calibration_factor(y_pre: np.ndarray, X_pre: np.ndarray, horizon: int, n_backtests: int = 6) -> float:
+def effective_horizon(horizon: int, n_pre: int) -> int:
+    """Backtest horizon: the test length, but at most a quarter of the pre-period."""
+    return int(min(horizon, n_pre // 4))
+
+
+def calibration_factor(y_pre: np.ndarray, X_pre: np.ndarray, horizon: int, n_backtests: int = 8,
+                       min_train: int = 14) -> float:
     """How much wider the intervals must be, measured on the pre-period itself.
 
-    The model's intervals assume the future is as calm as the past noise. In SEO
-    data groups also drift apart slowly, so out-of-sample errors are larger than
-    the model thinks (measured on demo data: 23% false positives at a nominal
-    10%). We therefore backtest: start a fake test at several points in the
-    pre-period, forecast `horizon` periods, and compare the real error of the
-    total with the simulated spread. The factor is the RMS of those standardised
-    errors, never below 1 (we only widen) and capped at 4.
+    The model's intervals assume the future is as calm as the past noise. When
+    groups slowly drift apart (common in real SEO data), out-of-sample errors are
+    larger than the model thinks. We backtest: start a fake test at several
+    points in the pre-period, forecast `horizon` periods, and compare the real
+    error of the total with the simulated spread. The factor is the RMS of those
+    standardised errors, never below 1 (we only widen) and capped at 4. On the
+    demo data it is about 1.06; it is a safety net for drifting real data.
     """
     n = len(y_pre)
-    h = int(min(horizon, n // 4))
-    first = max(int(n * 0.5), 14)
+    h = effective_horizon(horizon, n)
+    first = max(int(n * 0.5), min_train)
     last = n - h
     if h < 3 or last <= first:
         return 1.0
@@ -195,7 +208,7 @@ def _run_statsmodels(data: pd.DataFrame, n_pre: int, alpha: float, reps: int = 1
     X = data.iloc[:, 1:].to_numpy(float)
     season = season_length(data.index)
     res, sims, scale = _fit_and_simulate(y[:n_pre], X[:n_pre], X[n_pre:], reps)
-    factor = calibration_factor(y[:n_pre], X[:n_pre], len(y) - n_pre)
+    factor = calibration_factor(y[:n_pre], X[:n_pre], len(y) - n_pre, min_train=min_pre_points(data.index))
     sims = _widen(sims, factor)
     with warnings.catch_warnings():
         warnings.simplefilter("ignore")
@@ -362,9 +375,9 @@ def run_placebo(
 ) -> ImpactResult:
     """Fake intervention inside the pre-period. A sound setup finds nothing here."""
     pre = data[data.index < pd.Timestamp(intervention)]
-    n_fake = max(7, int(len(pre) * share))
-    if len(pre) - n_fake < 14:
-        raise ValueError("Pre-periode te kort voor een placebotest.")
+    n_fake = max(7 if _is_daily(pre.index) else 3, int(len(pre) * share))
+    if len(pre) - n_fake < min_pre_points(pre.index):
+        raise ValueError("pre-periode te kort voor een placebotest.")
     fake = pre.index[len(pre) - n_fake]
     return run_impact(pre, str(fake.date()), engine=engine, alpha=alpha, timeout=timeout)
 

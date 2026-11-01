@@ -16,7 +16,7 @@ import numpy as np
 import pandas as pd
 from scipy.stats import norm
 
-from .impact import _fit_and_simulate, _is_daily, _widen, calibration_factor
+from .impact import _fit_and_simulate, _is_daily, _widen, calibration_factor, effective_horizon, min_pre_points
 
 MIN_WEEKS = 3
 MAX_WEEKS = 12
@@ -44,12 +44,18 @@ def mde_curve(
     X_future = np.resize(tail, (horizon, 1))
 
     _, sims, _ = _fit_and_simulate(y, X, X_future, reps)
-    # Same widening as the analysis, measured over a typical 4-week test.
-    sims = _widen(sims, calibration_factor(y, X, 4 * per_week))
     z_a, z_b = norm.ppf(1 - alpha / 2), norm.ppf(power)
+    # Same widening as the analysis, per test length: the analysis calibrates on
+    # min(test length, pre-period / 4), so we do exactly that per horizon.
+    min_train = min_pre_points(test.index)
+    factors: dict[int, float] = {}
     rows = []
     for weeks in range(2, max_weeks + 1):
-        totals = sims[: weeks * per_week].sum(axis=0)
+        h = weeks * per_week
+        eff = effective_horizon(h, len(y))
+        if eff not in factors:
+            factors[eff] = calibration_factor(y, X, h, min_train=min_train)
+        totals = _widen(sims[:h], factors[eff]).sum(axis=0)
         lo, hi = np.percentile(totals, [100 * alpha / 2, 100 * (1 - alpha / 2)])
         half = (hi - lo) / 2 / max(totals.mean(), 1e-9)
         rows.append({"weken": weeks, "mde": float(half * (z_a + z_b) / z_a)})

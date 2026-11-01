@@ -22,7 +22,6 @@ from dataclasses import dataclass, field
 
 import numpy as np
 import pandas as pd
-from scipy import stats
 
 COVARIATES = {
     "log_clicks": "Klikken (log)",
@@ -187,18 +186,26 @@ def series_checks(series: pd.DataFrame, cfg: GroupingConfig, season: int) -> pd.
 
         ratio = np.log((y + 1) / (ctrl + 1))
         t = np.arange(n)
-        lr = stats.linregress(t, ratio)
-        slope_per_week = lr.slope * (7 if season == 7 else 1)
+        # Trend in the test/control ratio. Daily ratios are autocorrelated, so a
+        # plain regression p-value is too small; HAC (Newey-West) errors fix that.
+        import statsmodels.api as sm
+        lags = 7 if season == 7 else 2
+        ols = sm.OLS(ratio.to_numpy(), sm.add_constant(t)).fit(cov_type="HAC", cov_kwds={"maxlags": lags})
+        slope, trend_p = float(ols.params[1]), float(ols.pvalues[1])
+        slope_per_week = slope * (7 if season == 7 else 1)
 
         # A/A placebo: fit test ~ control (log) on the first 70%, predict the rest.
+        # Back-transforming from logs needs a smearing factor (Duan), or the
+        # prediction is biased low for noisy groups.
         cut = max(int(n * 0.7), 3)
         lx, ly = np.log1p(ctrl.values), np.log1p(y.values)
         b = np.polyfit(lx[:cut], ly[:cut], 1)
-        pred = np.expm1(np.polyval(b, lx[cut:]))
+        smear = float(np.mean(np.exp(ly[:cut] - np.polyval(b, lx[:cut]))))
+        pred = np.exp(np.polyval(b, lx[cut:])) * smear - 1
         placebo = float(y.values[cut:].sum() / max(pred.sum(), 1e-9) - 1) if n - cut > 0 else np.nan
 
         # Indicative MDE: noise of the detrended log ratio, corrected for autocorrelation.
-        resid = ratio - (lr.intercept + lr.slope * t)
+        resid = ratio - (ols.params[0] + slope * t)
         sd = float(np.std(resid, ddof=2)) if n > 3 else np.nan
         rho = float(pd.Series(resid).autocorr(1)) if n > 3 else 0.0
         rho = 0.0 if not np.isfinite(rho) else min(max(rho, 0.0), 0.9)
@@ -210,11 +217,11 @@ def series_checks(series: pd.DataFrame, cfg: GroupingConfig, season: int) -> pd.
             "groep": test,
             "correlatie": corr,
             "trendverschil_per_week": float(np.expm1(slope_per_week)),
-            "trend_p": float(lr.pvalue),
+            "trend_p": trend_p,
             "placebo_effect": placebo,
             "mde_indicatief": mde,
             "ok_correlatie": corr >= cfg.corr_min,
-            "ok_trend": lr.pvalue >= cfg.trend_p_min,
+            "ok_trend": trend_p >= cfg.trend_p_min,
             "ok_placebo": abs(placebo) <= cfg.placebo_max,
         })
     return pd.DataFrame(rows)

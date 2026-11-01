@@ -289,3 +289,95 @@ def test_voorbeelddata_walkthrough():
     assert at.date_input(key="a_live").value == date(2026, 8, 31)  # choice survives
     at.button[[b.label for b in at.button].index("▶︎ Analyse draaien")].click().run()
     assert any("Tussenstand: dag 14 van 21" in i.value for i in at.info)
+
+
+# --- Regression tests for the code review (Nov 2026) ---------------------------
+
+def test_dates_day_first_and_iso():
+    s = pd.Series(["01-09-2026", "12-09-2026", "13-09-2026", "30-09-2026"])
+    assert list(dio.to_dates(s).dt.strftime("%Y-%m-%d")) == ["2026-09-01", "2026-09-12", "2026-09-13", "2026-09-30"]
+    assert dio.to_dates(pd.Series(["2026-09-01", "2026-09-30"])).dt.day.tolist() == [1, 30]
+    try:
+        dio.to_dates(pd.Series(["2026-09-01", "geen datum"]))
+        raise AssertionError("expected ValueError")
+    except ValueError:
+        pass
+
+
+def test_number_formats():
+    nl_thousands = dio.parse_table("url\tdate\tclicks\nx\t2026-09-01\t1.234\ny\t2026-09-01\t12\n")
+    assert dio.to_long(nl_thousands)["clicks"].tolist() == [1234, 12]
+    us = dio.parse_table('url,date,clicks,sum_position\nx,2026-09-01,"1,234","1,234.5"\n')
+    out = dio.to_long(us)
+    assert out["clicks"].iloc[0] == 1234 and out["sum_position"].iloc[0] == 1234.5
+    semi = dio.parse_table("url;date;clicks;sum_position\nx;2026-09-01;7;120.5\n")
+    assert dio.to_long(semi)["sum_position"].iloc[0] == 120.5
+    try:
+        dio.to_long(dio.parse_table("url,date,clicks\nx,2026-09-01,veel\n"))
+        raise AssertionError("expected ValueError")
+    except ValueError:
+        pass
+
+
+def test_group_order_control_first():
+    assert dio.order_groups(["aangepast", "origineel"], {"indeling": {"group_names": ["origineel", "aangepast"]}}) == ["origineel", "aangepast"]
+    assert dio.order_groups(["test", "controle"], None) == ["controle", "test"]
+
+
+def test_app_group_order_with_custom_names():
+    long = dio.make_demo_long()
+    pre = long[long["date"] < "2026-08-01"]
+    res = grp.make_groups(pre, grp.GroupingConfig(group_names=["origineel", "aangepast"]))
+    at = AppTest.from_file(APP, default_timeout=120)
+    at.session_state["g_result"] = res
+    at.session_state["g_config"] = {"bron": {"start": "2026-05-04"}, "indeling": {"group_names": ["origineel", "aangepast"]}}
+    at.session_state["g_filters"] = sb.SourceFilters(start=date(2026, 5, 4), end=date(2026, 7, 31))
+    at.session_state["g_page_types"] = []
+    at.session_state["demo_full"] = long
+    at.run()
+    at.radio(key="step").set_value("2 · Effect meten").run()
+    at.radio(key="a_source").set_value("Demodata").run()
+    at.button[[b.label for b in at.button].index("Laad demodata")].click().run()
+    assert [x for x in at.selectbox if x.label == "Testgroep"][0].value == "aangepast"
+    assert [x for x in at.multiselect if x.label == "Controle"][0].value == ["origineel"]
+
+
+def test_weekly_sunday_start_and_partial_weeks():
+    long = dio.make_demo_long(n_urls=60)
+    _, res = _groups()
+    sunday = long.assign(date=long["date"] - pd.to_timedelta((long["date"].dt.weekday + 1) % 7, unit="D"))
+    sunday = sunday.groupby(["url", "date"], as_index=False)[["clicks", "impressions", "sum_position"]].sum()
+    a = pd.DataFrame({"url": long["url"].unique()[:30], "groep": "controle"})
+    a = pd.concat([a, pd.DataFrame({"url": long["url"].unique()[30:], "groep": "test"})])
+    w = dio.group_series(sunday, a)
+    assert w.sum().sum() > 0 and (w.index.weekday == 0).all()
+    weekly = dio.to_period(long[(long["date"] >= "2026-05-06") & (long["date"] <= "2026-06-10")], "week")
+    days_first = long[(long["date"] >= "2026-05-06")]["date"].min()
+    assert weekly["date"].min() > days_first  # the incomplete first week is dropped
+
+
+def test_weekly_minimums_and_placebo_separate():
+    long, res = _groups()
+    weekly = dio.group_series(dio.to_period(long, "week"), res.assignments)[["test", "controle"]]
+    live = str(weekly.index[9].date())  # 9 pre-weeks: enough for weekly data
+    out = im.run_impact(weekly, live)
+    assert out.kpis["n_pre"] == 9
+    try:
+        im.run_placebo(weekly, live)
+        raise AssertionError("expected ValueError for a too short placebo")
+    except ValueError:
+        pass
+
+
+def test_sql_whole_weeks():
+    f = sb.SourceFilters(table="p.d", start=date(2026, 8, 6), end=date(2026, 10, 29), granularity="week")
+    sql = sb.grouping_sql(f)
+    assert "BETWEEN '2026-08-10' AND '2026-10-25'" in sql
+
+
+def test_url_matching_normalised():
+    long = pd.DataFrame({"url": ["HTTPS://WWW.Voorbeeld.nl/p/1/#top"], "date": pd.to_datetime(["2026-09-01"]),
+                         "clicks": [3], "impressions": [10], "sum_position": [0]})
+    a = pd.DataFrame({"url": ["https://www.voorbeeld.nl/p/1/", "https://www.voorbeeld.nl/p/2/"], "groep": ["controle", "test"]})
+    rate, missing = dio.match_rate(long, a)
+    assert rate == 0.5 and missing == ["https://www.voorbeeld.nl/p/2/"]

@@ -124,11 +124,11 @@ Bij BigQuery vul je de tabel in (`project.dataset` of de volledige tabelnaam), o
 | Veld | Uitleg |
 |---|---|
 | Pre-periode | 28, 30, 60 of 90 dagen (standaard 90), tot en met 3 dagen geleden: dan is de GSC-data definitief. Meer dagen geeft betere groepen; 28 dagen is krap voor het looptijdadvies. Datums zelf kiezen kan via *Eigen periode*. Plak of upload je data, dan gebruikt de app de datums uit die data. |
-| Detailniveau | *Dag* geeft betere toetsen. *Week* maakt de export zo'n 7 keer kleiner. |
+| Detailniveau | *Dag* geeft betere toetsen. *Week* maakt de export zo'n 7 keer kleiner; de periode wordt dan afgerond op hele weken (maandag t/m zondag), en onvolledige randweken vallen weg. Met weekdata heb je minimaal 8 weken pre-periode nodig. |
 | Landen | ISO-3-codes in kleine letters, zoals `nld` en `bel`. Leeg betekent alle landen. |
 | Apparaten | Leeg betekent alle apparaten. |
 | Zoektype | Meestal `WEB`. |
-| Url-patronen opnemen | Regex (RE2), één per regel. Een url doet mee als hij op minstens één patroon matcht. Voorbeeld: `/p/` |
+| Url-patronen opnemen | Regex, één per regel. BigQuery en de GSC API gebruiken RE2: geen lookaheads (`(?=`) of terugverwijzingen. Een url doet mee als hij op minstens één patroon matcht. Voorbeeld: `/p/` |
 | Url-patronen uitsluiten | Regex, één per regel. Voorbeeld: `\?` om url's met parameters uit te sluiten. |
 | Paginatypes | `label = regex`, één per regel, eerste match telt. Bepaalt de strata. Voorbeeld: `pdp = /p/` en `lijst = /l/`. Wat nergens op matcht wordt `overig`. |
 
@@ -201,7 +201,7 @@ Gebruik de indeling uit stap 1 (zelfde sessie), of upload `indeling.csv`. Upload
 
 | Bron | Wat je doet |
 |---|---|
-| **BigQuery (query + plakken)** | De query bevat de groepsindeling als lijst en geeft alleen totalen per dag per groep terug (`date, groep, clicks, impressions, sum_position, n_urls`). Je plakt dus maar een paar honderd regels terug. Boven ongeveer 50.000 url's wordt de querytekst groter dan de BigQuery-limiet van 1 MB; dan valt de app terug op een url-query, en koppelt hij zelf de groepen. |
+| **BigQuery (query + plakken)** | De query bevat de groepsindeling als lijst en geeft alleen totalen per dag per groep terug (`date, groep, clicks, impressions, sum_position, n_urls`). Je plakt dus maar een paar honderd regels terug. Boven ongeveer 30.000 url's wordt de querytekst groter dan de BigQuery-limiet van 1 MB; dan valt de app terug op een url-query, en koppelt hij zelf de groepen. |
 | **GSC API** | De app haalt url × dag op voor de property uit de zijbalk en koppelt de groepen. |
 | **Eigen CSV** | Url × datum, datum × groep, of een brede tabel met een datumkolom en per reeks een kolom. Zie [Geplakte en geüploade data](#geplakte-en-geüploade-data). |
 | **Demodata** | Werkt met de demo-indeling uit stap 1 en een ingebouwd effect dat je zelf kiest. Handig om te zien hoe een echt effect eruitziet. |
@@ -222,7 +222,9 @@ Bij url-data toont de app welk deel van de url's uit de indeling in de data is g
 | Zekerheid | 80, 90 of 95%. Standaard de waarde uit `testconfig.json`, anders 90%. |
 | Placebotest | Draait hetzelfde model op een nepdatum in de pre-periode. Standaard aan. |
 
-Volg het looptijdadvies uit stap 1. De pre-periode moet minimaal 14 meetpunten hebben.
+Volg het looptijdadvies uit stap 1. De pre-periode moet minimaal 14 dagen zijn, of 8 weken bij weekdata.
+
+De controle staat altijd eerst, in de volgorde van stap 1 (uit `testconfig.json`). Zonder testconfig neemt de app de groep met "contr" in de naam als controle, en anders de eerste; dat meldt hij dan.
 
 ### Tussenstanden
 
@@ -251,7 +253,7 @@ De grafiek heeft drie panelen:
 
 Het grijze vlak is het uitrolvenster dat buiten de analyse blijft.
 
-**Placebotest:** vindt het model op een nepdatum een significant effect, dan liepen test en controle al uit elkaar vóór de ingreep, en is het resultaat onbetrouwbaar. De app zegt dat dan in de conclusie.
+**Placebotest:** het model doet alsof de test op een eerdere datum begon. Vindt het daar een significant effect, dan kan dat toeval zijn (bij 90% zekerheid ongeveer 1 op de 10 keer), maar het kan ook betekenen dat test en controle al uit elkaar liepen. Kijk dan in de grafiek of de lijnen vóór de livegang al uiteengaan. Is de pre-periode te kort voor een placebotest, dan slaat de app hem over en blijft de hoofdanalyse gewoon staan.
 
 Downloads: de grafiek (PNG), alle cijfers (JSON) en de reeksen achter de grafiek (CSV).
 
@@ -261,7 +263,10 @@ Downloads: de grafiek (PNG), alle cijfers (JSON) en de reeksen achter de grafiek
 
 De app herkent zelf het formaat:
 
-- **CSV** met komma's, **TSV** (zoals kopiëren uit BigQuery of Sheets), **puntkomma-CSV** met Nederlandse getallen (`1.234,5`), **JSON** of **NDJSON**.
+- **CSV** met komma's, **TSV** (zoals kopiëren uit BigQuery of Sheets), **puntkomma-CSV**, **JSON** of **NDJSON**.
+- **Datums:** `2026-09-01` (aanbevolen), `01-09-2026` of `1-9-2026` (dag eerst). Een datum die niet te lezen is geeft een foutmelding, in plaats van stilletjes weg te vallen.
+- **Getallen:** Nederlandse (`1.234,5`) en Amerikaanse (`1,234.5`) notatie worden per kolom herkend. Bij klikken en vertoningen is `1.234` duizend tweehonderdvierendertig. Een waarde die geen getal is geeft een foutmelding.
+- **Url's** worden vergeleken zonder `#`-deel en met kleine letters voor schema en host. Het pad blijft zoals het is (een slash aan het eind kan een andere pagina zijn). Url's uit de indeling die niet in de data staan, kun je in stap 2 bekijken.
 - Kolomnamen mogen in het Nederlands of Engels: `date`/`data_date`/`datum`, `url`/`page`/`pagina`, `clicks`/`klikken`, `impressions`/`vertoningen`, `groep`/`group`, `position`/`positie` of `sum_position`.
 
 Drie vormen worden herkend:
@@ -288,6 +293,8 @@ Drie vormen worden herkend:
 | *Je gcloud-account mag ... niet gebruiken* | Je mist de rol *Service Account Token Creator* op dat serviceaccount. De app toont het commando; `scripts/nieuwe-klant.sh` regelt het ook. |
 | *Een API staat uit in je quotaproject* | `gcloud services enable searchconsole.googleapis.com bigquery.googleapis.com --project JOUW_QUOTAPROJECT` |
 | Property-lijst is leeg | Het account is niet toegevoegd in Search Console voor die property. |
+| *X datum(s) zijn niet te lezen* of *... zijn geen getal* | Controleer de kolom in je export. Datums het liefst als `2026-09-01`. |
+| *De API zit aan zijn maximum van 50.000 rijen* | De GSC API geeft per dag hoogstens 50.000 rijen; url's met weinig verkeer kunnen dan ontbreken. Gebruik voor grote sites de BigQuery-route. |
 | BigQuery-export-lijst is leeg | Het account heeft geen leesrecht op de exportdataset, of de BigQuery API staat uit in het quotaproject. Je kunt de tabel ook gewoon intypen. |
 | *Te weinig url's over* | Verruim de patronen of verlaag *Min. klikken per url*. |
 | Toetsen falen steeds | Lage correlatie: te weinig verkeer per groep, meet per week of verruim de scope. Parallelle trend faalt: kies een andere pre-periode zonder grote gebeurtenis erin. SMD faalt: meer verkeersklassen of een andere seed. |
@@ -325,14 +332,14 @@ Kan, maar zonder gcloud-login: die bestaat daar niet.
 
 Beide geven dezelfde uitkomsten en grafiek. Op de demodata met een ingebouwd effect van +8% vonden ze +8,0% (statsmodels) en +7,5% (tfcausalimpact); zonder ingebouwd effect +0,1%, niet significant.
 
-**IJking.** Voor elke analyse doet de app een paar keer alsof de test eerder in de pre-periode begon, en vergelijkt hoe ver de voorspelling ernaast zat met de bandbreedte die het model gaf. Was het model te zeker, dan wordt de bandbreedte breder (nooit smaller). De factor staat als `calibration` in de KPI-download.
+**IJking.** Bij elke analyse met het statsmodels-model doet de app een paar keer alsof de test eerder in de pre-periode begon, en vergelijkt hoe ver de voorspelling ernaast zat met de bandbreedte die het model gaf. Was het model te zeker, dan wordt de bandbreedte breder (nooit smaller). De factor staat als `calibration` in de KPI-download. Het looptijdadvies ijkt per looptijd op dezelfde manier. Resultaten van tfcausalimpact worden niet geijkt.
 
 **Gemeten op 60 demodatasets** (4 weken meten, statsmodels):
 
 | Zekerheid | Onterecht een effect (doel: hoogstens) | Effect ter grootte van het advies gevonden (doel: 80%) |
 |---|---|---|
-| 90% | 8,3% (10%) | 82% |
-| 95% | 1,7% (5%) | 85% |
+| 80% | 18,3% (20%) | 80% |
+| 90% | 6,7% (10%) | 80% |
 
 Een eerdere versie gebruikte een eenzijdige p-waarde tegen een tweezijdige drempel; daardoor kwam "significant" twee keer zo vaak voor als ingesteld. Dat is hersteld, en de tests bewaken het.
 

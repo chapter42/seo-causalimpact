@@ -20,9 +20,16 @@ if [ -z "$ME" ]; then
   exit 1
 fi
 
-# Naam van het serviceaccount: seo-<klant>, kleine letters, 6 tot 30 tekens.
+# Naam van het serviceaccount: seo-<klant>. Google eist 6 tot 30 tekens:
+# kleine letters, cijfers en streepjes, beginnend met een letter.
 SLUG="$(echo "$KLANT" | tr '[:upper:]' '[:lower:]' | sed -E 's/[^a-z0-9-]+/-/g; s/^-+|-+$//g')"
-SA_NAME="$(echo "seo-${SLUG}" | cut -c1-30 | sed -E 's/-+$//')"
+if [ -z "$SLUG" ]; then
+  echo "Klantnaam '${KLANT}' bevat geen bruikbare tekens (a-z, 0-9). Kies een andere naam." >&2
+  exit 1
+fi
+SA_NAME="seo-${SLUG}"
+[ ${#SA_NAME} -lt 6 ] && SA_NAME="seo-klant-${SLUG}"
+SA_NAME="$(echo "$SA_NAME" | cut -c1-30 | sed -E 's/-+$//')"
 SA="${SA_NAME}@${PROJECT}.iam.gserviceaccount.com"
 
 echo "1/4 Project ${PROJECT}"
@@ -40,12 +47,24 @@ if ! gcloud iam service-accounts describe "$SA" --project "$PROJECT" >/dev/null 
 fi
 
 echo "4/4 ${ME} mag als dit serviceaccount handelen"
-gcloud iam service-accounts add-iam-policy-binding "$SA" --project "$PROJECT" \
-  --member "user:${ME}" --role "roles/iam.serviceAccountTokenCreator" --quiet >/dev/null
+# Een net aangemaakt account is niet meteen overal bekend: een paar keer proberen.
+for poging in 1 2 3 4 5 6; do
+  if gcloud iam service-accounts add-iam-policy-binding "$SA" --project "$PROJECT" \
+       --member "user:${ME}" --role "roles/iam.serviceAccountTokenCreator" --quiet >/dev/null 2>&1; then
+    break
+  fi
+  if [ "$poging" -eq 6 ]; then
+    echo "Rol toekennen lukte niet. Probeer over een minuut opnieuw:" >&2
+    echo "  gcloud iam service-accounts add-iam-policy-binding $SA --project $PROJECT --member user:${ME} --role roles/iam.serviceAccountTokenCreator" >&2
+    exit 1
+  fi
+  echo "   account nog niet actief, opnieuw over 10 seconden (poging ${poging} van 6)"
+  sleep 10
+done
 
 # Onthouden voor de app (lokaal bestand, staat in .gitignore).
 LIST="$(cd "$(dirname "$0")/.." && pwd)/serviceaccounts.txt"
-grep -q "= ${SA}$" "$LIST" 2>/dev/null || echo "${KLANT} = ${SA}" >> "$LIST"
+grep -qF "= ${SA}" "$LIST" 2>/dev/null || echo "${KLANT} = ${SA}" >> "$LIST"
 
 cat <<EOF
 

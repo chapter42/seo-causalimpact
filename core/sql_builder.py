@@ -38,6 +38,8 @@ class SourceFilters:
 def _raw(p: str) -> str:
     """Regex as a BigQuery raw string: r'...', or with double quotes when the
     pattern itself contains a single quote."""
+    if p.endswith("\\") and not p.endswith("\\\\"):
+        raise ValueError(f"Patroon eindigt op een losse backslash en is geen geldige regex: {p}")
     if "'" not in p:
         return f"r'{p}'"
     if '"' not in p:
@@ -49,8 +51,18 @@ def _str(s: str) -> str:
     return "'" + s.replace("\\", "\\\\").replace("'", "\\'") + "'"
 
 
+def whole_weeks(start: date, end: date) -> tuple[date, date]:
+    """Clip to whole Monday-Sunday weeks, so the first and last week are complete."""
+    from datetime import timedelta
+
+    s = start + timedelta(days=(7 - start.weekday()) % 7)
+    e = end - timedelta(days=(end.weekday() + 1) % 7)
+    return (s, e) if s <= e else (start, end)
+
+
 def _where(f: SourceFilters) -> str:
-    lines = [f"data_date BETWEEN {_str(str(f.start))} AND {_str(str(f.end))}"]
+    start, end = whole_weeks(f.start, f.end) if f.granularity == "week" else (f.start, f.end)
+    lines = [f"data_date BETWEEN {_str(str(start))} AND {_str(str(end))}"]
     if f.search_type:
         lines.append(f"search_type = {_str(f.search_type.upper())}")
     if f.countries:

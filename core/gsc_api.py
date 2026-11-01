@@ -18,6 +18,7 @@ SCOPES = [
     "https://www.googleapis.com/auth/cloud-platform",  # BigQuery: find GSC exports
 ]
 ROW_LIMIT = 25_000
+DAILY_ROW_CAP = 50_000  # API maximum per day per search type
 
 
 def credentials_from_json(raw: str | bytes | dict):
@@ -205,4 +206,10 @@ def fetch_url_day(
         return pd.DataFrame(columns=["url", "date", "clicks", "impressions", "sum_position"])
     out = pd.concat(frames, ignore_index=True)
     out["date"] = pd.to_datetime(out["date"])
-    return out.groupby(["url", "date"], as_index=False)[["clicks", "impressions", "sum_position"]].sum()
+    # The API returns at most ~50.000 rows per day per search type. A day close
+    # to that cap probably misses low-traffic URLs (they then look like zeros).
+    per_day = out.groupby("date").size()
+    capped = per_day[per_day >= DAILY_ROW_CAP * 0.98]
+    out = out.groupby(["url", "date"], as_index=False)[["clicks", "impressions", "sum_position"]].sum()
+    out.attrs["capped_days"] = [d.date().isoformat() for d in capped.index]
+    return out

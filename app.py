@@ -23,6 +23,17 @@ from core.data_io import nl, nl_pct
 st.set_page_config(page_title="SEO-test · CausalImpact", page_icon="📈", layout="wide")
 ss = st.session_state
 
+# Streamlit forgets widget values when a widget is not drawn (e.g. step 1 while
+# you are in step 2). Re-assigning the values of the step that is NOT drawn in
+# this run keeps them. (Re-assigning a widget that is drawn in the same run
+# would trigger a Streamlit warning, so the visible step is left alone.)
+# Buttons and file uploaders cannot be set this way, so they are skipped.
+_hidden = "a_" if str(ss.get("step", "1")).startswith("1") else "g_"
+for _k in list(ss.keys()):
+    if isinstance(_k, str) and _k.startswith(_hidden) and not _k.endswith(("_go", "_up")) \
+            and _k not in ("a_assign", "a_cfg"):
+        ss[_k] = ss[_k]
+
 COUNTRIES = ["nld", "bel", "deu", "fra", "gbr", "usa", "esp", "ita", "aut", "che", "lux", "dnk", "swe", "pol"]
 DEVICES = ["DESKTOP", "MOBILE", "TABLET"]
 SEARCH_TYPES = ["WEB", "IMAGE", "VIDEO", "NEWS", "DISCOVER"]
@@ -53,7 +64,8 @@ def fmt_table(df: pd.DataFrame, fmt: dict) -> "pd.io.formats.style.Styler":
     return df.style.format(fmt, na_rep="–")
 
 
-ACCOUNTS_FILE = "serviceaccounts.txt"  # local, git-ignored: "klant = sa@project.iam.gserviceaccount.com"
+ROOT = os.path.dirname(os.path.abspath(__file__))
+ACCOUNTS_FILE = os.path.join(ROOT, "serviceaccounts.txt")  # local, git-ignored: "klant = sa@project.iam.gserviceaccount.com"
 
 
 def load_accounts() -> dict[str, str]:
@@ -85,7 +97,7 @@ def service_account_ui() -> None:
         if method == "gcloud-login":
             accounts = load_accounts()
             choice = st.selectbox("Handelen als", ["(eigen gcloud-account)", *accounts, "(ander serviceaccount…)"],
-                                  help=f"Klanten en serviceaccounts staan in {ACCOUNTS_FILE}.")
+                                  help="Klanten en serviceaccounts staan in serviceaccounts.txt in de app-map.")
             if choice == "(ander serviceaccount…)":
                 sa = st.text_input("Serviceaccount", placeholder="seo@klant-project.iam.gserviceaccount.com").strip() or None
             elif choice != "(eigen gcloud-account)":
@@ -94,7 +106,7 @@ def service_account_ui() -> None:
             creds_fn = lambda: gsc_api.credentials_from_gcloud(sa)  # noqa: E731
         else:
             up = st.file_uploader("Sleutel (JSON)", type=["json"], key="sa_upload")
-            default_path = os.environ.get("GOOGLE_APPLICATION_CREDENTIALS", "credentials/service-account.json")
+            default_path = os.environ.get("GOOGLE_APPLICATION_CREDENTIALS", os.path.join(ROOT, "credentials", "service-account.json"))
             path = st.text_input("…of pad naar sleutel", value=default_path)
             creds_fn = lambda: gsc_api.credentials_from_json(up.getvalue()) if up else gsc_api.credentials_from_file(path)  # noqa: E731
 
@@ -274,6 +286,10 @@ def fetch_api(f: sb.SourceFilters, key: str) -> pd.DataFrame | None:
             st.warning("Geen data. Check property, periode en patronen.")
             return None
         ss[f"{key}_site_used"] = site  # stored in testconfig.json
+        capped = long.attrs.get("capped_days") or []
+        if capped:
+            st.warning(f"Op {len(capped)} dag(en) zit de API aan zijn maximum van 50.000 rijen (bijv. {capped[0]}). "
+                       "Url's met weinig verkeer kunnen dan ontbreken. Gebruik voor deze site liever de BigQuery-route.")
         return dio.to_period(long, f.granularity)
     return None
 
@@ -341,27 +357,27 @@ def step_groups() -> None:
     st.subheader("Indeling")
     c1, c2, c3, c4 = st.columns(4)
     with c1:
-        names = [n.strip() for n in st.text_input("Groepen (eerste = controle)", "controle, test").split(",") if n.strip()]
-        seed = st.number_input("Seed", 0, value=42, help="Zelfde data + zelfde seed = zelfde indeling.")
+        names = [n.strip() for n in st.text_input("Groepen (eerste = controle)", "controle, test", key="g_names").split(",") if n.strip()]
+        seed = st.number_input("Seed", 0, value=42, key="g_seed", help="Zelfde data + zelfde seed = zelfde indeling.")
     with c2:
-        bins = st.slider("Verkeersklassen per paginatype", 2, 10, 4)
-        use_trend = st.checkbox("Stratificeer ook op trend", True)
+        bins = st.slider("Verkeersklassen per paginatype", 2, 10, 4, key="g_bins")
+        use_trend = st.checkbox("Stratificeer ook op trend", True, key="g_trend")
     with c3:
-        min_clicks = st.number_input("Min. klikken per url (pre-periode)", 0, value=10, step=5)
-        max_share = st.number_input("Max. aandeel per url (%)", 0.0, 100.0, 2.0, 0.5,
+        min_clicks = st.number_input("Min. klikken per url (pre-periode)", 0, value=10, step=5, key="g_min_clicks")
+        max_share = st.number_input("Max. aandeel per url (%)", 0.0, 100.0, 2.0, 0.5, key="g_max_share",
                                     help="Url's die meer dan dit deel van alle klikken halen zijn uitschieters en gaan eruit.")
     with c4:
         per = "dagen" if dio.infer_granularity(long["date"]) == "day" else "weken"
         st.select_slider("Zekerheid", [80, 90, 95], value=90, key="g_zekerheid", format_func=lambda v: f"{v}%",
                          help="Hoe zeker je wilt zijn voordat je een effect echt noemt. Voor SEO is 80 tot 90% gangbaar. "
                               "Geldt voor het looptijdadvies en (via testconfig.json) voor de analyse in stap 2.")
-        attempts = st.number_input("Max. pogingen", 1, 500, 50)
+        attempts = st.number_input("Max. pogingen", 1, 500, 50, key="g_attempts")
     with st.expander("Drempels voor de toetsen"):
         t1, t2, t3, t4 = st.columns(4)
-        smd_max = t1.number_input("Max. |SMD|", 0.01, 0.5, 0.10, 0.01, help="Gestandaardiseerd verschil per kenmerk; < 0,1 is gangbaar.")
-        corr_min = t2.number_input("Min. correlatie reeksen", 0.0, 1.0, 0.90, 0.01)
-        trend_p = t3.number_input("Min. p parallelle trend", 0.0, 1.0, 0.20, 0.05)
-        placebo = t4.number_input("Max. placebo-effect (%)", 0.0, 50.0, 3.0, 0.5)
+        smd_max = t1.number_input("Max. |SMD|", 0.01, 0.5, 0.10, 0.01, key="g_smd", help="Gestandaardiseerd verschil per kenmerk; < 0,1 is gangbaar.")
+        corr_min = t2.number_input("Min. correlatie reeksen", 0.0, 1.0, 0.90, 0.01, key="g_corr")
+        trend_p = t3.number_input("Min. p parallelle trend", 0.0, 1.0, 0.20, 0.05, key="g_trendp")
+        placebo = t4.number_input("Max. placebo-effect (%)", 0.0, 50.0, 3.0, 0.5, key="g_placebo")
 
     if st.button("▶︎ Maak groepen", type="primary", width="stretch"):
         cfg = grp.GroupingConfig(
@@ -537,8 +553,13 @@ def step_analysis() -> None:
     else:
         st.info("Upload indeling.csv uit stap 1, of maak eerst groepen.")
         return
-    groups = list(dict.fromkeys(assignments["groep"]))
-    st.caption(" · ".join(f"{g}: {nl((assignments['groep'] == g).sum())} url's" for g in groups))
+    groups = dio.order_groups(list(dict.fromkeys(assignments["groep"].astype(str))), cfg)
+    ss.a_groups = groups
+    st.caption(" · ".join(f"{g}{' (controle)' if i == 0 else ''}: {nl((assignments['groep'] == g).sum())} url's"
+                          for i, g in enumerate(groups)))
+    if not ((cfg or {}).get("indeling") or {}).get("group_names") and not any("contr" in g.lower() for g in groups):
+        st.warning(f"Kan niet zien welke groep de controle is; ik neem '{groups[0]}'. "
+                   "Upload testconfig.json uit stap 1, of kies hieronder zelf de testgroep en controle.")
 
     st.subheader("Data")
     source = st.radio("Bron", ["BigQuery (query + plakken)", "GSC API", "Eigen CSV", "Demodata"],
@@ -610,12 +631,14 @@ def step_analysis() -> None:
     if (wide.index.min().date(), wide.index.max().date()) != full_range:
         st.caption(f"Analyse op {wide.index.min():%d-%m-%Y} t/m {wide.index.max():%d-%m-%Y} "
                    f"(data loopt van {full_range[0]:%d-%m-%Y} t/m {full_range[1]:%d-%m-%Y}; afgekapt op de analyseperiode).")
-    cols = list(wide.columns)
+    # Control first, in the order of the test (never alphabetical).
+    order = ss.get("a_groups") or []
+    cols = [c for c in order if c in wide.columns] + [c for c in wide.columns if c not in order]
     c1, c2, c3 = st.columns(3)
     with c1:
         treated = st.selectbox("Testgroep", cols, index=1 if len(cols) > 1 else 0)
-        controls = st.multiselect("Controle", [c for c in cols if c != treated],
-                                  default=[c for c in cols if c != treated][:1],
+        ctrl_default = [cols[0]] if cols and cols[0] != treated else [c for c in cols if c != treated][:1]
+        controls = st.multiselect("Controle", [c for c in cols if c != treated], default=ctrl_default,
                                   help="Normaal alleen 'controle'. Andere testgroepen zijn zelf beïnvloed en horen hier niet.")
     idx = wide.index
     test_cfg = (cfg or {}).get("test", {})
@@ -673,10 +696,17 @@ def step_analysis() -> None:
         try:
             with st.spinner("Model draait…"):
                 res = im.run_impact(data, str(live), str(post), engine=engine, alpha=alpha)
-                pl = im.run_placebo(data, str(live), engine=engine, alpha=alpha) if do_placebo else None
         except Exception as exc:  # noqa: BLE001
             st.error(f"Analyse mislukt: {exc}")
             return
+        pl = None
+        ss.a_placebo_note = None
+        if do_placebo:
+            try:
+                with st.spinner("Placebotest…"):
+                    pl = im.run_placebo(data, str(live), engine=engine, alpha=alpha)
+            except Exception as exc:  # noqa: BLE001 — the main result stands without a placebo
+                ss.a_placebo_note = f"Placebotest overgeslagen: {exc}"
         meta = {
             "zekerheid": zek,
             "advies_weken": ((cfg or {}).get("looptijd") or {}).get("advies_weken"),
@@ -689,9 +719,14 @@ def step_analysis() -> None:
 
 
 def long_to_wide(long: pd.DataFrame, assignments: pd.DataFrame) -> dict:
-    rate = dio.match_rate(long, assignments)
+    rate, missing = dio.match_rate(long, assignments)
     (st.warning if rate < 0.8 else st.caption)(f"{nl_pct(rate, sign=False)} van de url's uit de indeling gevonden in de data.")
-    return {m: dio.group_series(long, assignments, m) for m in ["clicks", "impressions"]}
+    if missing:
+        with st.expander(f"Niet gevonden url's ({nl(len(missing))})"):
+            st.caption("Geen data in deze periode of met deze filters. Een paar is normaal (pagina's zonder vertoningen); "
+                       "veel wijst op een andere property, land of patroon dan in stap 1.")
+            st.code("\n".join(missing[:500]), language=None)
+    return {m: dio.group_series(long, assignments, m, ss.get("a_groups")) for m in ["clicks", "impressions"]}
 
 
 def table_to_wide(tbl: pd.DataFrame, assignments: pd.DataFrame):
@@ -701,14 +736,19 @@ def table_to_wide(tbl: pd.DataFrame, assignments: pd.DataFrame):
             return long_to_wide(dio.to_long(tbl), assignments)
         if shape == "group":
             g = dio.to_group_daily(tbl)
+            if dio.infer_granularity(g["date"]) == "week":
+                g = g.assign(date=dio.snap_to_monday(g["date"]).to_numpy()).groupby(["date", "groep"], as_index=False).sum()
             return {m: g.pivot_table(index="date", columns="groep", values=m, aggfunc="sum").sort_index().fillna(0)
                     for m in ["clicks", "impressions"] if g[m].notna().any()}
         t = dio.standardise_columns(tbl)
         if "date" not in t:
             st.error("Geen datumkolom gevonden.")
             return None
-        t["date"] = pd.to_datetime(t["date"])
-        return t.set_index("date").sort_index().apply(pd.to_numeric, errors="coerce").dropna(axis=1, how="all")
+        t["date"] = dio.to_dates(t["date"])
+        if dio.infer_granularity(t["date"]) == "week":
+            t["date"] = dio.snap_to_monday(t["date"]).to_numpy()
+        series = {c: dio.to_number(t[c], c, integer=True) for c in t.columns if c != "date"}
+        return pd.DataFrame(series, index=t["date"]).groupby(level=0).sum().sort_index().dropna(axis=1, how="all")
     except ValueError as exc:
         st.error(str(exc))
         return None
@@ -727,8 +767,10 @@ def verdict(k: dict, metric: str, pl: im.ImpactResult | None, fit: dict, unit: s
                f"omvat nul. Een effect kleiner dan ongeveer {nl_pct(max(abs(k['rel_effect_lower']), abs(k['rel_effect_upper'])), sign=False)} "
                "is met deze looptijd niet van ruis te onderscheiden.")
     if pl is not None and pl.kpis["significant"]:
-        txt += (f"\n\n⚠️ **De placebotest slaat aan** ({nl_pct(pl.kpis['rel_effect'])} op een nepdatum). "
-                "Test- en controlegroep liepen al uiteen vóór de ingreep; het resultaat is daardoor onbetrouwbaar.")
+        txt += (f"\n\n⚠️ **Let op: de placebotest slaat aan** ({nl_pct(pl.kpis['rel_effect'])} op een nepdatum vóór de livegang). "
+                f"Dat gebeurt bij {zek}% zekerheid ook in een goede opzet ongeveer 1 op de {round(1 / (1 - zek / 100))} keer, "
+                "maar het kan ook betekenen dat test- en controlegroep al uit elkaar liepen. Kijk in de grafiek of de lijnen "
+                "vóór de livegang al uiteengaan; zo ja, vertrouw het resultaat dan niet.")
     if fit.get("corr", 1) < 0.9:
         txt += (f"\n\n⚠️ De controle voorspelt de testgroep in de pre-periode matig (correlatie {nl(fit['corr'], 2)}). "
                 "Overweeg meten per week of een grotere scope.")
@@ -772,6 +814,8 @@ def show_impact(res: im.ImpactResult, pl: im.ImpactResult | None, treated: str, 
     fig = im.plot_impact(res, label)
     st.pyplot(fig, width="stretch")
 
+    if pl is None and ss.get("a_placebo_note"):
+        st.caption(ss.a_placebo_note)
     if pl is not None:
         pk = pl.kpis
         st.markdown(
@@ -808,7 +852,7 @@ def show_impact(res: im.ImpactResult, pl: im.ImpactResult | None, treated: str, 
 # Layout
 # =============================================================================
 st.sidebar.title("📈 SEO-test")
-step = st.sidebar.radio("Stap", ["1 · Groepen maken", "2 · Effect meten"], label_visibility="collapsed")
+step = st.sidebar.radio("Stap", ["1 · Groepen maken", "2 · Effect meten"], label_visibility="collapsed", key="step")
 service_account_ui()
 st.sidebar.caption("Model: statsmodels standaard; tfcausalimpact " + ("beschikbaar" if im.tfci_available() else "niet geïnstalleerd"))
 
