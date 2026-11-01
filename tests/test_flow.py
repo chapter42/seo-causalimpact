@@ -194,3 +194,21 @@ def test_app_sidebar_pickers():
     at.radio(key="g_source").set_value("GSC API (serviceaccount)").run()
     assert not at.exception
     assert any("sc-domain:voorbeeld.nl" in c.value for c in at.caption)
+
+
+def test_stale_env_key_is_ignored_for_gcloud(monkeypatch):
+    import google.auth
+    import google.oauth2.credentials as oc
+    from core import gsc_api
+
+    monkeypatch.setenv("GOOGLE_APPLICATION_CREDENTIALS", "./credentials/bestaat-niet.json")
+    seen = {}
+
+    def fake_default(*a, **k):
+        import os
+        seen["env"] = os.environ.get("GOOGLE_APPLICATION_CREDENTIALS")
+        return oc.Credentials(token="t"), "p"
+
+    monkeypatch.setattr(google.auth, "default", fake_default)
+    gsc_api.credentials_from_gcloud(None)
+    assert seen["env"] is None

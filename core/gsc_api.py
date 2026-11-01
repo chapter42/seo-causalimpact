@@ -47,9 +47,17 @@ def credentials_from_gcloud(service_account: str | None = None):
     Without it, the app acts as the logged-in user; then the login must include
     the Search Console scope.
     """
+    import os
+
     import google.auth
     from google.auth import impersonated_credentials
     from google.auth.exceptions import DefaultCredentialsError
+
+    # A stale GOOGLE_APPLICATION_CREDENTIALS (pointing to a missing key file) makes
+    # Google ignore the gcloud login. For gcloud-login we skip it in that case.
+    stale = os.environ.get("GOOGLE_APPLICATION_CREDENTIALS")
+    if stale and not os.path.isfile(os.path.expanduser(stale)):
+        os.environ.pop("GOOGLE_APPLICATION_CREDENTIALS")
 
     try:
         source, _ = google.auth.default(scopes=["https://www.googleapis.com/auth/cloud-platform"])
