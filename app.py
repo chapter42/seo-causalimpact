@@ -1,0 +1,579 @@
+"""SEO-testen met CausalImpact: groepen maken vooraf en effect meten achteraf.
+
+Runnen:  streamlit run app.py
+"""
+
+from __future__ import annotations
+
+import io
+import json
+import os
+from datetime import date, datetime, timedelta
+
+import numpy as np
+import pandas as pd
+import streamlit as st
+
+from core import data_io as dio
+from core import grouping as grp
+from core import impact as im
+from core import sql_builder as sb
+from core.data_io import nl, nl_pct
+
+st.set_page_config(page_title="SEO-test · CausalImpact", page_icon="📈", layout="wide")
+ss = st.session_state
+
+COUNTRIES = ["nld", "bel", "deu", "fra", "gbr", "usa", "esp", "ita", "aut", "che", "lux", "dnk", "swe", "pol"]
+DEVICES = ["DESKTOP", "MOBILE", "TABLET"]
+SEARCH_TYPES = ["WEB", "IMAGE", "VIDEO", "NEWS", "DISCOVER"]
+
+
+# =============================================================================
+# Helpers
+# =============================================================================
+def lines(text: str) -> list[str]:
+    return [ln.strip() for ln in (text or "").splitlines() if ln.strip() and not ln.strip().startswith("#")]
+
+
+def parse_page_types(text: str) -> list[tuple[str, str]]:
+    out = []
+    for ln in lines(text):
+        if "=" not in ln:
+            raise ValueError(f"Paginatype zonder '=': {ln}  (verwacht: label = regex)")
+        label, pattern = ln.split("=", 1)
+        out.append((label.strip(), pattern.strip()))
+    return out
+
+
+def page_types_text(pts: list) -> str:
+    return "\n".join(f"{a} = {b}" for a, b in pts)
+
+
+def fmt_table(df: pd.DataFrame, fmt: dict) -> "pd.io.formats.style.Styler":
+    return df.style.format(fmt, na_rep="–")
+
+
+def service_account_ui() -> None:
+    """Sidebar block: load a service-account key for the GSC API (kept in memory only)."""
+    with st.sidebar.expander("🔑 Serviceaccount (GSC API)", expanded="creds" not in ss):
+        up = st.file_uploader("Sleutel (JSON)", type=["json"], key="sa_upload")
+        default_path = os.environ.get("GOOGLE_APPLICATION_CREDENTIALS", "credentials/service-account.json")
+        path = st.text_input("…of pad naar sleutel", value=default_path)
+        if st.button("Laden", use_container_width=True):
+            from core import gsc_api
+            try:
+                ss.creds = gsc_api.credentials_from_json(up.getvalue()) if up else gsc_api.credentials_from_file(path)
+                ss.sites = gsc_api.list_sites(ss.creds)
+                st.success(f"{ss.creds.service_account_email}: {len(ss.sites)} propert{'y' if len(ss.sites) == 1 else 'ies'}")
+            except Exception as exc:  # noqa: BLE001
+                st.error(f"Laden mislukt: {exc}")
+        if "creds" in ss:
+            st.caption(f"Actief: {ss.creds.service_account_email}")
+        st.caption("De sleutel blijft alleen in het geheugen van deze sessie.")
+
+
+def filters_ui(prefix: str, defaults: dict, pre_label: str) -> tuple[sb.SourceFilters, list]:
+    """Shared selection widgets. Returns the filters and the page types."""
+    c1, c2, c3 = st.columns(3)
+    with c1:
+        start = st.date_input(f"{pre_label}: start", value=defaults["start"], key=f"{prefix}start", format="DD-MM-YYYY")
+        end = st.date_input(f"{pre_label}: eind", value=defaults["end"], key=f"{prefix}end", format="DD-MM-YYYY")
+        gran = st.radio("Detailniveau", ["day", "week"], index=["day", "week"].index(defaults["granularity"]),
+                        format_func={"day": "Dag", "week": "Week"}.get, horizontal=True, key=f"{prefix}gran",
+                        help="Dag geeft betere toetsen. Week maakt de export ~7× kleiner.")
+    with c2:
+        countries = st.multiselect("Landen (ISO-3)", sorted(set(COUNTRIES + defaults["countries"])),
+                                   default=defaults["countries"], key=f"{prefix}countries")
+        extra = st.text_input("Overige landen (komma's)", key=f"{prefix}extra_c")
+        countries += [c.strip().lower() for c in extra.split(",") if c.strip()]
+        devices = st.multiselect("Apparaten (leeg = alle)", DEVICES, default=defaults["devices"], key=f"{prefix}dev")
+        stype = st.selectbox("Zoektype", SEARCH_TYPES, index=SEARCH_TYPES.index(defaults["search_type"]), key=f"{prefix}stype")
+    with c3:
+        inc = st.text_area("Url-patronen opnemen (regex, één per regel)", value="\n".join(defaults["include"]),
+                           height=90, key=f"{prefix}inc", help="Een url telt mee als hij op minstens één patroon matcht.")
+        exc = st.text_area("Url-patronen uitsluiten", value="\n".join(defaults["exclude"]), height=68, key=f"{prefix}exc")
+    pts_txt = st.text_area(
+        "Paginatypes voor de stratificatie (label = regex, eerste match telt)",
+        value=page_types_text(defaults["page_types"]), height=80, key=f"{prefix}pt",
+        help="Bijvoorbeeld:\npdp = /p/\nlijst = /l/\nWat nergens op matcht wordt 'overig'.",
+    )
+    f = sb.SourceFilters(
+        table=defaults["table"], start=start, end=end, countries=countries, devices=devices,
+        search_type=stype, include_patterns=lines(inc), exclude_patterns=lines(exc),
+        granularity=gran, min_impressions=defaults["min_impressions"],
+    )
+    return f, parse_page_types(pts_txt)
+
+
+def default_filters(cfg: dict | None = None, analysis: bool = False) -> dict:
+    today = date.today()
+    d = {
+        "start": today - timedelta(days=3 + 12 * 7), "end": today - timedelta(days=3),
+        "granularity": "day", "countries": ["nld"], "devices": [], "search_type": "WEB",
+        "include": [], "exclude": [], "page_types": [],
+        "table": "project.searchconsole.searchdata_url_impression", "min_impressions": 0,
+    }
+    if cfg:
+        src = cfg.get("bron", {})
+        d.update({
+            "countries": src.get("countries", d["countries"]), "devices": src.get("devices", []),
+            "search_type": src.get("search_type", "WEB"), "include": src.get("include_patterns", []),
+            "exclude": src.get("exclude_patterns", []), "table": src.get("table", d["table"]),
+            "granularity": src.get("granularity", "day"),
+            "page_types": [tuple(x) for x in cfg.get("paginatypes", [])],
+        })
+        d["start"] = date.fromisoformat(src["start"]) if src.get("start") else d["start"]
+        if not analysis and src.get("end"):
+            d["end"] = date.fromisoformat(src["end"])
+    return d
+
+
+def paste_or_upload(key: str, help_text: str) -> pd.DataFrame | None:
+    """Paste box + uploader. Returns the parsed table after pressing the button."""
+    c1, c2 = st.columns([3, 2])
+    with c1:
+        pasted = st.text_area("Plak het resultaat", height=140, key=f"{key}_paste", help=help_text,
+                              placeholder="Kopieer de resultaten in BigQuery (CSV/TSV/JSON) en plak ze hier.")
+    with c2:
+        up = st.file_uploader("…of upload het bestand", type=["csv", "tsv", "txt", "json"], key=f"{key}_up")
+    if st.button("Inlezen", key=f"{key}_go", type="primary"):
+        raw = up.getvalue() if up else pasted
+        if not raw:
+            st.warning("Niets geplakt of geüpload.")
+            return None
+        try:
+            return dio.parse_table(raw)
+        except Exception as exc:  # noqa: BLE001
+            st.error(f"Kon de tabel niet lezen: {exc}")
+    return None
+
+
+def fetch_api(f: sb.SourceFilters, key: str) -> pd.DataFrame | None:
+    from core import gsc_api
+    if "creds" not in ss:
+        st.info("Laad eerst een serviceaccount-sleutel in de zijbalk.")
+        return None
+    site = st.selectbox("Property", ss.get("sites", []), key=f"{key}_site")
+    fresh = st.checkbox("Ook verse (nog niet definitieve) data", key=f"{key}_fresh",
+                        help="Standaard alleen definitieve data; verse data van de laatste dagen kan nog wijzigen.")
+    if st.button("Ophalen via GSC API", key=f"{key}_go", type="primary", disabled=not site):
+        box = st.empty()
+        try:
+            long = gsc_api.fetch_url_day(
+                ss.creds, site, f.start, f.end, countries=f.countries, devices=f.devices,
+                search_type=f.search_type, include_patterns=f.include_patterns,
+                exclude_patterns=f.exclude_patterns, data_state="all" if fresh else "final",
+                progress=lambda m: box.caption(m),
+            )
+        except Exception as exc:  # noqa: BLE001
+            st.error(f"Ophalen mislukt: {exc}")
+            return None
+        box.empty()
+        if long.empty:
+            st.warning("Geen data. Check property, periode en patronen.")
+            return None
+        ss[f"{key}_site_used"] = site
+        return dio.to_period(long, f.granularity)
+    return None
+
+
+def data_summary(long: pd.DataFrame) -> None:
+    c = st.columns(4)
+    c[0].metric("Url's", nl(long["url"].nunique()))
+    c[1].metric("Klikken", nl(long["clicks"].sum()))
+    c[2].metric("Vertoningen", nl(long["impressions"].sum()))
+    c[3].metric("Periodes", f"{nl(long['date'].nunique())} ({dio.infer_granularity(long['date'])})")
+
+
+# =============================================================================
+# Step 1: groups
+# =============================================================================
+def step_groups() -> None:
+    st.header("1 · Groepen maken")
+    st.caption("Kies welke url's meedoen, haal de pre-periode op en verdeel ze gestratificeerd over een "
+               "controlegroep en testgroep(en). De app toetst of de groepen vooraf gelijk genoeg zijn.")
+
+    st.subheader("Selectie")
+    source = st.radio("Bron", ["BigQuery (query + plakken)", "GSC API (serviceaccount)", "Demodata"],
+                      horizontal=True, key="g_source")
+    defaults = default_filters()
+    if source.startswith("BigQuery"):
+        defaults["table"] = st.text_input("Tabel (project.dataset of volledige tabel)", value=ss.get("g_table", defaults["table"]), key="g_table")
+        defaults["min_impressions"] = st.number_input("Minimaal vertoningen per url in de query", 0, value=100, step=50, key="g_minimp")
+    try:
+        f, page_types = filters_ui("g_", defaults, "Pre-periode")
+    except ValueError as exc:
+        st.error(str(exc))
+        return
+
+    long = None
+    if source.startswith("BigQuery"):
+        sql = sb.grouping_sql(f)
+        st.code(sql, language="sql")
+        st.download_button("⬇︎ Query (.sql)", sql, "stap1_groepsindeling.sql", "text/plain")
+        tbl = paste_or_upload("g_bq", "Kolommen: url, date, clicks, impressions, sum_position")
+        if tbl is not None:
+            try:
+                long = dio.to_long(tbl)
+            except ValueError as exc:
+                st.error(str(exc))
+    elif source.startswith("GSC"):
+        long = fetch_api(f, "g_api")
+    else:
+        if st.button("Laad demodata", type="primary"):
+            demo = dio.make_demo_long()
+            long = dio.to_period(demo[demo["date"] < "2026-08-01"], f.granularity)
+            ss.demo_full = demo
+            st.info("Demo: 600 url's (/p/, /l/, /inf/), 89 dagen. Tip: paginatypes `pdp = /p/` en `lijst = /l/`.")
+
+    if long is not None:
+        ss.g_long, ss.g_filters, ss.g_page_types = long, f, page_types
+        ss.pop("g_result", None)
+
+    if "g_long" not in ss:
+        return
+    long = ss.g_long
+    data_summary(long)
+
+    st.subheader("Indeling")
+    c1, c2, c3, c4 = st.columns(4)
+    with c1:
+        names = [n.strip() for n in st.text_input("Groepen (eerste = controle)", "controle, test").split(",") if n.strip()]
+        seed = st.number_input("Seed", 0, value=42, help="Zelfde data + zelfde seed = zelfde indeling.")
+    with c2:
+        bins = st.slider("Verkeersklassen per paginatype", 2, 10, 4)
+        use_trend = st.checkbox("Stratificeer ook op trend", True)
+    with c3:
+        min_clicks = st.number_input("Min. klikken per url (pre-periode)", 0, value=10, step=5)
+        max_share = st.number_input("Max. aandeel per url (%)", 0.0, 100.0, 2.0, 0.5,
+                                    help="Url's die meer dan dit deel van alle klikken halen zijn uitschieters en gaan eruit.")
+    with c4:
+        per = "dagen" if dio.infer_granularity(long["date"]) == "day" else "weken"
+        planned = st.number_input(f"Geplande looptijd test ({per})", 1, value=42 if per == "dagen" else 6,
+                                  help="Voor de indicatieve MDE: het kleinste effect dat je met deze opzet kunt aantonen.")
+        attempts = st.number_input("Max. pogingen", 1, 500, 50)
+    with st.expander("Drempels voor de toetsen"):
+        t1, t2, t3, t4 = st.columns(4)
+        smd_max = t1.number_input("Max. |SMD|", 0.01, 0.5, 0.10, 0.01, help="Gestandaardiseerd verschil per kenmerk; < 0,1 is gangbaar.")
+        corr_min = t2.number_input("Min. correlatie reeksen", 0.0, 1.0, 0.90, 0.01)
+        trend_p = t3.number_input("Min. p parallelle trend", 0.0, 1.0, 0.20, 0.05)
+        placebo = t4.number_input("Max. placebo-effect (%)", 0.0, 50.0, 3.0, 0.5)
+
+    if st.button("▶︎ Maak groepen", type="primary", use_container_width=True):
+        cfg = grp.GroupingConfig(
+            group_names=names, page_types=ss.g_page_types, traffic_bins=bins, use_trend=use_trend,
+            min_clicks=min_clicks, max_url_share=max_share / 100, seed=int(seed), max_attempts=int(attempts),
+            smd_max=smd_max, corr_min=corr_min, trend_p_min=trend_p, placebo_max=placebo / 100,
+            planned_post_periods=int(planned),
+        )
+        try:
+            with st.spinner("Groepen verdelen en toetsen…"):
+                season = 7 if per == "dagen" else 1
+                ss.g_result, ss.g_cfg = grp.make_groups(long, cfg, season=season), cfg
+        except ValueError as exc:
+            st.error(str(exc))
+            return
+
+    if "g_result" in ss:
+        show_group_result(ss.g_result, ss.g_cfg)
+
+
+def show_group_result(r: grp.GroupingResult, cfg: grp.GroupingConfig) -> None:
+    a = r.assignments
+    if r.passed:
+        st.success(f"Indeling haalt alle toetsen (poging {r.attempt}, seed {r.seed_used}).")
+    else:
+        st.warning(f"Indeling haalt niet alle toetsen; best scorende gekozen (seed {r.seed_used}).")
+    for n in r.notes:
+        st.caption("• " + n)
+
+    tot = a.groupby("groep").agg(urls=("url", "size"), klikken=("clicks", "sum"), vertoningen=("impressions", "sum"))
+    tot = tot.reindex(cfg.group_names)
+    tot["aandeel klikken"] = tot["klikken"] / tot["klikken"].sum()
+    st.dataframe(fmt_table(tot, {"urls": nl, "klikken": nl, "vertoningen": nl, "aandeel klikken": lambda v: nl_pct(v, sign=False)}),
+                 use_container_width=True)
+
+    c1, c2 = st.columns(2)
+    with c1:
+        st.markdown("**Balans per kenmerk**")
+        b = r.balance.copy()
+        b["ok"] = b["ok"].map({True: "✅", False: "❌"})
+        st.dataframe(fmt_table(b, {"controle": lambda v: nl(v, 3), "test": lambda v: nl(v, 3), "smd": lambda v: nl(v, 3)}),
+                     use_container_width=True, hide_index=True)
+    with c2:
+        st.markdown("**Toetsen op de reeksen**")
+        ck = r.checks.copy()
+        for col in ["ok_correlatie", "ok_trend", "ok_placebo"]:
+            ck[col] = ck[col].map({True: "✅", False: "❌"})
+        st.dataframe(fmt_table(ck, {
+            "correlatie": lambda v: nl(v, 3), "trendverschil_per_week": nl_pct, "trend_p": lambda v: nl(v, 2),
+            "placebo_effect": nl_pct, "mde_indicatief": lambda v: nl_pct(v, sign=False),
+        }), use_container_width=True, hide_index=True)
+        st.caption("MDE indicatief: kleinste relatieve effect dat je met deze groepen en looptijd waarschijnlijk "
+                   "aantoont (80% power). Het is een ondergrens; reken in de praktijk op meer.")
+
+    st.markdown("**Groepen in de pre-periode (geïndexeerd, gemiddelde = 100)**")
+    st.line_chart(r.series / r.series.mean() * 100, use_container_width=True)
+
+    with st.expander("Strata"):
+        st.dataframe(a.pivot_table(index="stratum", columns="groep", values="url", aggfunc="size", fill_value=0),
+                     use_container_width=True)
+    if len(r.excluded):
+        with st.expander(f"Uitgesloten url's ({nl(len(r.excluded))})"):
+            st.dataframe(r.excluded[["url", "clicks", "impressions", "reden"]], use_container_width=True, hide_index=True)
+
+    f: sb.SourceFilters = ss.g_filters
+    config = {
+        "aangemaakt": datetime.now().isoformat(timespec="seconds"),
+        "bron": {
+            "type": ss.get("g_source"), "table": f.full_table(), "property": ss.get("g_api_site_used"),
+            "start": str(f.start), "end": str(f.end), "countries": f.countries, "devices": f.devices,
+            "search_type": f.search_type, "include_patterns": f.include_patterns,
+            "exclude_patterns": f.exclude_patterns, "granularity": f.granularity,
+        },
+        "paginatypes": cfg.page_types,
+        "indeling": {k: v for k, v in cfg.__dict__.items() if k != "page_types"} | {"seed_used": r.seed_used, "geslaagd": r.passed},
+        "aantallen": {g: int(n) for g, n in a["groep"].value_counts().items()},
+    }
+
+    st.subheader("Export")
+    d1, d2, d3 = st.columns(3)
+    d1.download_button("⬇︎ Indeling (CSV)", a.to_csv(index=False), "indeling.csv", "text/csv", use_container_width=True)
+    d2.download_button("⬇︎ Testconfig (JSON)", dio.dump_config(config), "testconfig.json", "application/json",
+                       use_container_width=True, help="Bewaar deze bij de test: stap 2 vult hiermee alle filters in.")
+    tests = "\n".join(f"{g}\t{u}" for g, u in a.loc[a["groep"] != cfg.group_names[0], ["groep", "url"]].itertuples(index=False))
+    d3.download_button("⬇︎ Url's testgroep(en) (TSV)", "groep\turl\n" + tests, "testgroep_urls.tsv", "text/tab-separated-values",
+                       use_container_width=True)
+    for g in cfg.group_names[1:]:
+        with st.expander(f"Url's {g} kopiëren ({nl((a['groep'] == g).sum())})"):
+            st.code("\n".join(a.loc[a["groep"] == g, "url"]), language=None)
+
+
+# =============================================================================
+# Step 2: analysis
+# =============================================================================
+def step_analysis() -> None:
+    st.header("2 · Effect meten")
+    st.caption("Lees de indeling in, haal de data vanaf de pre-periode tot nu op en meet met CausalImpact "
+               "hoeveel de testgroep afwijkt van wat de controlegroep voorspelt.")
+
+    st.subheader("Indeling")
+    have = "g_result" in ss
+    use_session = st.checkbox("Gebruik de indeling uit stap 1", value=have, disabled=not have)
+    c1, c2 = st.columns(2)
+    up_a = c1.file_uploader("indeling.csv", type=["csv"], key="a_assign", disabled=use_session)
+    up_c = c2.file_uploader("testconfig.json (vult de filters in)", type=["json"], key="a_cfg")
+
+    cfg = dio.load_config(up_c.getvalue()) if up_c else None
+    if use_session:
+        assignments = ss.g_result.assignments[["url", "groep"]]
+        if cfg is None:
+            f = ss.g_filters
+            cfg = {"bron": {**f.__dict__, "start": str(f.start), "end": str(f.end), "table": f.full_table()},
+                   "paginatypes": ss.g_page_types}
+    elif up_a:
+        assignments = dio.standardise_columns(dio.parse_table(up_a.getvalue()))
+        if not {"url", "groep"} <= set(assignments.columns):
+            st.error("indeling.csv mist de kolommen url en groep.")
+            return
+        assignments = assignments[["url", "groep"]]
+    else:
+        st.info("Upload indeling.csv uit stap 1, of maak eerst groepen.")
+        return
+    groups = list(dict.fromkeys(assignments["groep"]))
+    st.caption(" · ".join(f"{g}: {nl((assignments['groep'] == g).sum())} url's" for g in groups))
+
+    st.subheader("Data")
+    source = st.radio("Bron", ["BigQuery (query + plakken)", "GSC API (serviceaccount)", "Eigen CSV", "Demodata"],
+                      horizontal=True, key="a_source")
+    defaults = default_filters(cfg, analysis=True)
+    if source.startswith("BigQuery"):
+        defaults["table"] = st.text_input("Tabel", value=defaults["table"], key="a_table")
+    try:
+        f, _ = filters_ui("a_", defaults, "Analyseperiode")
+    except ValueError as exc:
+        st.error(str(exc))
+        return
+
+    wide = None
+    if source.startswith("BigQuery"):
+        sql, size = sb.analysis_sql(f, assignments)
+        if size > sb.MAX_QUERY_BYTES * 0.95:
+            st.warning(f"De query met ingebakken indeling is {nl(size / 1e6, 1)} MB; BigQuery staat 1 MB toe. "
+                       "Gebruik de url-query hieronder; de app koppelt de groepen dan zelf.")
+            sql = sb.url_level_sql(f)
+        st.code(sql, language="sql")
+        st.download_button("⬇︎ Query (.sql)", sql, "stap2_effectmeting.sql", "text/plain")
+        tbl = paste_or_upload("a_bq", "Kolommen: date, groep, clicks, impressions (of url-niveau)")
+        if tbl is not None:
+            wide = table_to_wide(tbl, assignments)
+    elif source.startswith("GSC"):
+        long = fetch_api(f, "a_api")
+        if long is not None:
+            wide = long_to_wide(long, assignments)
+    elif source == "Eigen CSV":
+        tbl = paste_or_upload("a_csv", "url × datum, datum × groep, of een brede tabel met datum + reeksen")
+        if tbl is not None:
+            wide = table_to_wide(tbl, assignments)
+    else:
+        if "demo_full" not in ss or not use_session:
+            st.info("Demodata werkt met de demo-indeling uit stap 1.")
+        else:
+            test_g = st.selectbox("Groep met ingebouwd effect", groups[1:], key="a_demo_g")
+            uplift = st.slider("Ingebouwd effect (%)", -20, 30, 8, key="a_demo_u")
+            if st.button("Laad demodata", type="primary"):
+                demo = dio.apply_demo_effect(ss.demo_full, assignments, test_g, "2026-09-07", uplift / 100)
+                wide = long_to_wide(dio.to_period(demo, f.granularity), assignments)
+                st.info("Demo: livegang 1 september, uitrol t/m 6 september, meten vanaf 7 september.")
+
+    if wide is not None:
+        ss.a_wide = wide
+        ss.pop("a_result", None)
+    if "a_wide" not in ss:
+        return
+    metrics = ss.a_wide
+
+    st.subheader("Instellingen")
+    metric = st.radio("Metric", list(metrics), format_func={"clicks": "Klikken", "impressions": "Vertoningen"}.get,
+                      horizontal=True) if isinstance(metrics, dict) else None
+    wide = metrics[metric] if metric else metrics
+    cols = list(wide.columns)
+    c1, c2, c3 = st.columns(3)
+    with c1:
+        treated = st.selectbox("Testgroep", cols, index=1 if len(cols) > 1 else 0)
+        controls = st.multiselect("Controle", [c for c in cols if c != treated],
+                                  default=[c for c in cols if c != treated][:1],
+                                  help="Normaal alleen 'controle'. Andere testgroepen zijn zelf beïnvloed en horen hier niet.")
+    idx = wide.index
+    default_live = idx[int(len(idx) * 0.66)].date()
+    with c2:
+        live = st.date_input("Livegang (start uitrol)", value=default_live, min_value=idx.min().date(),
+                             max_value=idx.max().date(), format="DD-MM-YYYY")
+        post = st.date_input("Meten vanaf", value=live, min_value=live, max_value=idx.max().date(), format="DD-MM-YYYY",
+                             help="Dagen tussen livegang en deze datum (uitrol, recrawl) blijven buiten de analyse.")
+    with c3:
+        engines = ["statsmodels", "tfcausalimpact"]
+        engine = st.selectbox("Model", engines, help="statsmodels: snel en stabiel. tfcausalimpact: het Google-model, "
+                              "draait apart met een tijdslimiet en valt terug op statsmodels als het vastloopt.")
+        alpha = st.select_slider("α", [0.01, 0.05, 0.10], value=0.05)
+        do_placebo = st.checkbox("Placebotest in de pre-periode", True)
+
+    st.line_chart(wide[[treated, *controls]], use_container_width=True)
+
+    if not controls:
+        st.warning("Kies minstens één controlereeks.")
+        return
+    if st.button("▶︎ Analyse draaien", type="primary", use_container_width=True):
+        data = wide[[treated, *controls]]
+        try:
+            with st.spinner("Model draait…"):
+                res = im.run_impact(data, str(live), str(post), engine=engine, alpha=alpha)
+                pl = im.run_placebo(data, str(live), engine=engine, alpha=alpha) if do_placebo else None
+        except Exception as exc:  # noqa: BLE001
+            st.error(f"Analyse mislukt: {exc}")
+            return
+        ss.a_result = (res, pl, treated, metric or "waarde")
+
+    if "a_result" in ss:
+        show_impact(*ss.a_result)
+
+
+def long_to_wide(long: pd.DataFrame, assignments: pd.DataFrame) -> dict:
+    rate = dio.match_rate(long, assignments)
+    (st.warning if rate < 0.8 else st.caption)(f"{nl_pct(rate, sign=False)} van de url's uit de indeling gevonden in de data.")
+    return {m: dio.group_series(long, assignments, m) for m in ["clicks", "impressions"]}
+
+
+def table_to_wide(tbl: pd.DataFrame, assignments: pd.DataFrame):
+    try:
+        shape = dio.detect_shape(tbl)
+        if shape == "long":
+            return long_to_wide(dio.to_long(tbl), assignments)
+        if shape == "group":
+            g = dio.to_group_daily(tbl)
+            return {m: g.pivot_table(index="date", columns="groep", values=m, aggfunc="sum").sort_index().fillna(0)
+                    for m in ["clicks", "impressions"] if g[m].notna().any()}
+        t = dio.standardise_columns(tbl)
+        if "date" not in t:
+            st.error("Geen datumkolom gevonden.")
+            return None
+        t["date"] = pd.to_datetime(t["date"])
+        return t.set_index("date").sort_index().apply(pd.to_numeric, errors="coerce").dropna(axis=1, how="all")
+    except ValueError as exc:
+        st.error(str(exc))
+        return None
+
+
+def verdict(k: dict, metric: str, pl: im.ImpactResult | None, fit: dict, unit: str) -> str:
+    rel, lo, hi = nl_pct(k["rel_effect"]), nl_pct(k["rel_effect_lower"]), nl_pct(k["rel_effect_upper"])
+    n = k["n_post"]
+    if k["significant"]:
+        direction = "meer" if k["rel_effect"] > 0 else "minder"
+        txt = (f"**De testgroep haalde {rel} {metric} ten opzichte van de verwachting** "
+               f"(bandbreedte {lo} tot {hi}). Dat is {nl(k['abs_effect_cum'], sign=True)} {metric} "
+               f"{direction} over {nl(n)} {unit}. De kans dat dit toeval is, is {nl(k['p_value'] * 100, 1)}%.")
+    else:
+        txt = (f"**Geen aantoonbaar effect.** De beste schatting is {rel}, maar de bandbreedte ({lo} tot {hi}) "
+               f"omvat nul. Een effect kleiner dan ongeveer {nl_pct(max(abs(k['rel_effect_lower']), abs(k['rel_effect_upper'])), sign=False)} "
+               "is met deze looptijd niet van ruis te onderscheiden.")
+    if pl is not None and pl.kpis["significant"]:
+        txt += (f"\n\n⚠️ **De placebotest slaat aan** ({nl_pct(pl.kpis['rel_effect'])} op een nepdatum). "
+                "Test- en controlegroep liepen al uiteen vóór de ingreep; het resultaat is daardoor onbetrouwbaar.")
+    if fit.get("corr", 1) < 0.9:
+        txt += (f"\n\n⚠️ De controle voorspelt de testgroep in de pre-periode matig (correlatie {nl(fit['corr'], 2)}). "
+                "Overweeg meten per week of een grotere scope.")
+    return txt
+
+
+def show_impact(res: im.ImpactResult, pl: im.ImpactResult | None, treated: str, metric: str) -> None:
+    k = res.kpis
+    label = {"clicks": "klikken", "impressions": "vertoningen"}.get(metric, metric)
+    unit = "dagen" if im._is_daily(res.frame.index) else "weken"
+    for w in res.warnings:
+        st.caption("• " + w)
+    st.markdown(verdict(k, label, pl, res.pre_fit, unit))
+
+    m = st.columns(4)
+    m[0].metric("Relatief effect", nl_pct(k["rel_effect"]), help=f"Bandbreedte {nl_pct(k['rel_effect_lower'])} tot {nl_pct(k['rel_effect_upper'])}")
+    m[1].metric(f"Cumulatief ({label})", nl(k["abs_effect_cum"], sign=True),
+                help=f"Bandbreedte {nl(k['abs_effect_cum_lower'], sign=True)} tot {nl(k['abs_effect_cum_upper'], sign=True)}")
+    m[2].metric("p-waarde", nl(k["p_value"], 3), help="Kans op dit resultaat (of extremer) zonder echt effect.")
+    m[3].metric("Pre-periode fit", f"r = {nl(res.pre_fit.get('corr', np.nan), 3)}",
+                help=f"Gemiddelde afwijking (MAPE) {nl_pct(res.pre_fit.get('mape', np.nan), sign=False)}")
+
+    fig = im.plot_impact(res, label)
+    st.pyplot(fig, use_container_width=True)
+
+    if pl is not None:
+        pk = pl.kpis
+        st.markdown(
+            f"**Placebotest** (nepdatum {pd.Timestamp(pk['post_start']).strftime('%d-%m-%Y')}): "
+            f"{nl_pct(pk['rel_effect'])}, p = {nl(pk['p_value'], 3)} → "
+            + ("❌ slaat aan" if pk["significant"] else "✅ niets gevonden, zoals het hoort")
+        )
+        with st.expander("Placebografiek"):
+            st.pyplot(im.plot_impact(pl, label, title="Placebo: nepdatum in de pre-periode"), use_container_width=True)
+
+    png = io.BytesIO()
+    fig.savefig(png, format="png", dpi=150, bbox_inches="tight")
+    out = {**k, "testgroep": treated, "metric": metric, "pre_fit": res.pre_fit,
+           "placebo": pl.kpis if pl is not None else None}
+    d1, d2, d3 = st.columns(3)
+    d1.download_button("⬇︎ Grafiek (PNG)", png.getvalue(), "causal_impact.png", "image/png", use_container_width=True)
+    d2.download_button("⬇︎ KPI's (JSON)", json.dumps(out, indent=2, default=float), "causal_impact_kpis.json",
+                       "application/json", use_container_width=True)
+    d3.download_button("⬇︎ Reeksen (CSV)", res.frame.to_csv(), "causal_impact_reeksen.csv", "text/csv", use_container_width=True)
+
+
+# =============================================================================
+# Layout
+# =============================================================================
+st.sidebar.title("📈 SEO-test")
+step = st.sidebar.radio("Stap", ["1 · Groepen maken", "2 · Effect meten"], label_visibility="collapsed")
+service_account_ui()
+st.sidebar.caption("Model: statsmodels standaard; tfcausalimpact " + ("beschikbaar" if im.tfci_available() else "niet geïnstalleerd"))
+
+if step.startswith("1"):
+    step_groups()
+else:
+    step_analysis()

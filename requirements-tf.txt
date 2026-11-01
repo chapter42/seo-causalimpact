@@ -1,0 +1,3 @@
+-r requirements.txt
+# Optioneel: het Google-model. Trekt TensorFlow + TensorFlow Probability mee.
+tfcausalimpact>=0.0.14

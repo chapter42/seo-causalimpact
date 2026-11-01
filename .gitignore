@@ -1,0 +1,8 @@
+.venv/
+__pycache__/
+*.pyc
+.pytest_cache/
+credentials/
+*.json.key
+service-account*.json
+.DS_Store
