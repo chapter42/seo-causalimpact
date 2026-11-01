@@ -137,12 +137,44 @@ def service_account_ui() -> None:
             st.sidebar.caption("BigQuery doorzoeken lukte niet: " + ss.bq_error.splitlines()[0])
 
 
+LAG_DAYS = 3  # GSC data is final after about 3 days
+PRE_OPTIONS = [28, 30, 60, 90]
+
+
+def period_ui(prefix: str, defaults: dict, analysis: bool) -> tuple[date, date]:
+    """Periods without date pickers.
+
+    Step 1: the last 28/30/60/90 days, ending LAG_DAYS ago.
+    Step 2: from the start of the pre-period (testconfig) up to the latest final day.
+    A custom range stays possible but tucked away.
+    """
+    end_default = date.today() - timedelta(days=LAG_DAYS)
+    if not analysis:
+        choice = st.radio("Pre-periode", [*PRE_OPTIONS, "eigen"], index=PRE_OPTIONS.index(90), horizontal=True,
+                          key=f"{prefix}period", format_func=lambda v: f"{v} dagen" if v != "eigen" else "Eigen periode",
+                          help="Tot en met 3 dagen geleden (dan is GSC-data definitief). Meer dagen geeft betere groepen; "
+                               "28 dagen is krap voor het looptijdadvies.")
+        if choice != "eigen":
+            start, end = end_default - timedelta(days=int(choice) - 1), end_default
+            st.caption(f"{start:%d-%m-%Y} t/m {end:%d-%m-%Y}")
+            return start, end
+    else:
+        start, end = defaults["start"], end_default
+        custom = st.checkbox("Andere periode", key=f"{prefix}custom_period",
+                             help="Standaard: vanaf de start van de pre-periode (testconfig) tot de laatste definitieve dag.")
+        if not custom:
+            st.caption(f"Analyseperiode: {start:%d-%m-%Y} t/m {end:%d-%m-%Y}")
+            return start, end
+    start = st.date_input("Van", value=defaults["start"], key=f"{prefix}start", format="DD-MM-YYYY")
+    end = st.date_input("Tot en met", value=defaults["end"] if not analysis else end_default, key=f"{prefix}end", format="DD-MM-YYYY")
+    return start, end
+
+
 def filters_ui(prefix: str, defaults: dict, pre_label: str) -> tuple[sb.SourceFilters, list]:
     """Shared selection widgets. Returns the filters and the page types."""
     c1, c2, c3 = st.columns(3)
     with c1:
-        start = st.date_input(f"{pre_label}: start", value=defaults["start"], key=f"{prefix}start", format="DD-MM-YYYY")
-        end = st.date_input(f"{pre_label}: eind", value=defaults["end"], key=f"{prefix}end", format="DD-MM-YYYY")
+        start, end = period_ui(prefix, defaults, analysis=pre_label != "Pre-periode")
         gran = st.radio("Detailniveau", ["day", "week"], index=["day", "week"].index(defaults["granularity"]),
                         format_func={"day": "Dag", "week": "Week"}.get, horizontal=True, key=f"{prefix}gran",
                         help="Dag geeft betere toetsen. Week maakt de export ~7× kleiner.")
@@ -173,7 +205,7 @@ def filters_ui(prefix: str, defaults: dict, pre_label: str) -> tuple[sb.SourceFi
 def default_filters(cfg: dict | None = None, analysis: bool = False) -> dict:
     today = date.today()
     d = {
-        "start": today - timedelta(days=3 + 12 * 7), "end": today - timedelta(days=3),
+        "start": today - timedelta(days=LAG_DAYS + (89 if not analysis else 180)), "end": today - timedelta(days=LAG_DAYS),
         "granularity": "day", "countries": ["nld"], "devices": [], "search_type": "WEB",
         "include": [], "exclude": [], "page_types": [],
         "table": "project.searchconsole.searchdata_url_impression", "min_impressions": 0,
@@ -440,7 +472,8 @@ def show_group_result(r: grp.GroupingResult, cfg: grp.GroupingConfig) -> None:
         "aangemaakt": datetime.now().isoformat(timespec="seconds"),
         "bron": {
             "type": ss.get("g_source"), "table": f.full_table(), "property": ss.get("g_api_site_used"),
-            "start": str(f.start), "end": str(f.end), "countries": f.countries, "devices": f.devices,
+            "start": str(ss.g_long["date"].min().date()), "end": str(ss.g_long["date"].max().date()),
+            "countries": f.countries, "devices": f.devices,
             "search_type": f.search_type, "include_patterns": f.include_patterns,
             "exclude_patterns": f.exclude_patterns, "granularity": f.granularity,
         },
@@ -554,7 +587,7 @@ def step_analysis() -> None:
             if st.button("Laad demodata", type="primary"):
                 demo = dio.apply_demo_effect(ss.demo_full, assignments, test_g, "2026-09-07", uplift / 100)
                 wide = long_to_wide(dio.to_period(demo, f.granularity), assignments)
-                st.info("Demo: livegang 1 september, uitrol t/m 6 september, meten vanaf 7 september.")
+                st.info("Demo: livegang 1 september, uitrolvenster 7 dagen.")
 
     if wide is not None:
         ss.a_wide = wide
@@ -606,9 +639,19 @@ def step_analysis() -> None:
     _keep("a_live", _in_range(test_cfg.get("livegang")) or idx[int(len(idx) * 0.66)].date(), lo_d, hi_d)
     with c2:
         live = st.date_input("Livegang (start uitrol)", min_value=lo_d, max_value=hi_d, format="DD-MM-YYYY", key="a_live")
-        _keep("a_post", max(_in_range(test_cfg.get("meten_vanaf")) or live, live), live, hi_d)
-        post = st.date_input("Meten vanaf", min_value=live, max_value=hi_d, format="DD-MM-YYYY", key="a_post",
-                             help="Dagen tussen livegang en deze datum (uitrol, recrawl) blijven buiten de analyse.")
+        rollout_opts = [0, 7, 14, 21]
+        if "a_rollout" not in ss:
+            prev = test_cfg.get("uitrolvenster_dagen")
+            ss.a_rollout = prev if prev in rollout_opts else 7
+        rollout = st.radio("Uitrolvenster", rollout_opts, horizontal=True, key="a_rollout",
+                           format_func=lambda d: "geen" if d == 0 else f"{d} dagen",
+                           help="Tijd voor uitrol en recrawl na de livegang. Die dagen tellen niet mee. "
+                                "Hele weken houden het weekpatroon zuiver.")
+        post = live + timedelta(days=int(rollout))
+        if post > hi_d:
+            st.error(f"Livegang plus uitrolvenster ({post:%d-%m-%Y}) ligt na de laatste dag in de data ({hi_d:%d-%m-%Y}).")
+            return
+        st.caption(f"Meten vanaf {post:%d-%m-%Y}")
     with c3:
         engines = ["statsmodels", "tfcausalimpact"]
         engine = st.selectbox("Model", engines, help="statsmodels: snel en stabiel. tfcausalimpact: het Google-model, "
@@ -751,9 +794,11 @@ def show_impact(res: im.ImpactResult, pl: im.ImpactResult | None, treated: str, 
 
     cfg = meta.get("cfg")
     if cfg:
-        updated = {**cfg, "zekerheid": zek, "test": {**cfg.get("test", {}), "livegang": meta["live"], "meten_vanaf": meta["post"]}}
+        rollout_days = (date.fromisoformat(meta["post"]) - date.fromisoformat(meta["live"])).days
+        updated = {**cfg, "zekerheid": zek, "test": {**cfg.get("test", {}), "livegang": meta["live"],
+                                                     "meten_vanaf": meta["post"], "uitrolvenster_dagen": rollout_days}}
         st.download_button(
-            "⬇︎ Testconfig bijwerken (met livegang en meetstart)", dio.dump_config(updated), "testconfig.json",
+            "⬇︎ Testconfig bijwerken (met livegang en uitrolvenster)", dio.dump_config(updated), "testconfig.json",
             "application/json", width="stretch",
             help="Vervang je oude testconfig.json hiermee. Bij de volgende tussenstand staan de datums dan meteen goed.",
         )

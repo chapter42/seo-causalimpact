@@ -26,14 +26,13 @@ Een verzonnen testcase om de app mee te leren kennen: 400 url's van `www.voorbee
 **Stap 1: groepen maken**
 
 1. Bron *BigQuery (query + plakken)*. De query die de app toont kun je negeren.
-2. Pre-periode: 01-06-2026 t/m 30-08-2026.
-3. Paginatypes:
+2. Paginatypes:
    ```
    pdp = /p/
    lijst = /l/
    info = /inf/
    ```
-4. Upload `stap1_pre_periode.csv` en klik *Inlezen*, daarna *Maak groepen*.
+3. Upload `stap1_pre_periode.csv` en klik *Inlezen*, daarna *Maak groepen*. De pre-periode hoef je niet te kiezen: de app neemt de datums uit het bestand.
 
 Met seed 42 en de standaardinstellingen krijg je dezelfde indeling als `indeling.csv`. Bekijk de toetsen en het looptijdadvies.
 
@@ -41,11 +40,11 @@ Met seed 42 en de standaardinstellingen krijg je dezelfde indeling als `indeling
 
 1. Zet *Gebruik de indeling uit stap 1* uit, en upload `indeling.csv` en `testconfig.json`.
 2. Bron *BigQuery (query + plakken)*: upload `stap2_groepstotalen_met_effect.csv` en klik *Inlezen*.
-3. Livegang: 31-08-2026. Meten vanaf: 07-09-2026.
+3. Livegang: 31-08-2026. Uitrolvenster: 7 dagen (de app meet dan vanaf 07-09-2026).
 4. Klik *Analyse draaien*.
 
 Verwacht resultaat: een effect van ongeveer +5,5% (bandbreedte ongeveer +4% tot +7%), significant bij 90% zekerheid. De placebotest vindt niets.
 
 Doe daarna hetzelfde met `stap2_groepstotalen_zonder_effect.csv`: dan vindt de app geen aantoonbaar effect (ongeveer −0,7%, bandbreedte rond nul).
 
-**Tussenstand proberen:** zet *Meten vanaf* op 07-09-2026, en kies bij *Analyseperiode: eind* 20-09-2026 (2 weken meten). De app toont dan *Tussenstand: dag 14 van 21*.
+**Tussenstand proberen:** vink bij de analyseperiode *Andere periode* aan en zet *Tot en met* op 20-09-2026 (2 weken meten). De app toont dan *Tussenstand: dag 14 van 21*.

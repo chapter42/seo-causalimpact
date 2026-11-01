@@ -123,7 +123,7 @@ Bij BigQuery vul je de tabel in (`project.dataset` of de volledige tabelnaam), o
 
 | Veld | Uitleg |
 |---|---|
-| Pre-periode | De periode waarop de groepen worden verdeeld en getoetst. Standaard de laatste 12 weken tot 3 dagen geleden. Neem minimaal 8 weken; een heel jaar als seizoen meespeelt. |
+| Pre-periode | 28, 30, 60 of 90 dagen (standaard 90), tot en met 3 dagen geleden: dan is de GSC-data definitief. Meer dagen geeft betere groepen; 28 dagen is krap voor het looptijdadvies. Datums zelf kiezen kan via *Eigen periode*. Plak of upload je data, dan gebruikt de app de datums uit die data. |
 | Detailniveau | *Dag* geeft betere toetsen. *Week* maakt de export zo'n 7 keer kleiner. |
 | Landen | ISO-3-codes in kleine letters, zoals `nld` en `bel`. Leeg betekent alle landen. |
 | Apparaten | Leeg betekent alle apparaten. |
@@ -195,7 +195,7 @@ Tijdens de test:
 
 ### Indeling inlezen
 
-Gebruik de indeling uit stap 1 (zelfde sessie), of upload `indeling.csv`. Upload ook `testconfig.json`: dan staan periode, landen, patronen, tabel, zekerheid en (na een eerste tussenstand) livegang en meetstart meteen goed, en stelt de app de property van stap 1 voor.
+Gebruik de indeling uit stap 1 (zelfde sessie), of upload `indeling.csv`. Upload ook `testconfig.json`: dan staan periode, landen, patronen, tabel, zekerheid en (na een eerste tussenstand) livegang en uitrolvenster meteen goed, en stelt de app de property van stap 1 voor.
 
 ### Bron kiezen
 
@@ -215,9 +215,9 @@ Bij url-data toont de app welk deel van de url's uit de indeling in de data is g
 | Metric | Klikken of vertoningen. Klikken zijn het meest zakelijk, vertoningen reageren sneller op rankingwijzigingen. |
 | Testgroep | De groep met de wijziging. |
 | Controle | Normaal alleen `controle`. Andere testgroepen zijn zelf beïnvloed en horen hier niet. |
-| Analyseperiode | Van welke tot welke datum de data meetelt. Geldt ook voor geplakte en geüploade tabellen, dus je kunt er een tussenstand mee nabootsen. |
+| Analyseperiode | Vanzelf: van de start van de pre-periode (uit `testconfig.json`) tot en met de laatste definitieve dag. Via *Andere periode* kies je zelf datums; dat geldt ook voor geplakte en geüploade tabellen, dus zo boots je een tussenstand na. |
 | Livegang | De dag waarop de uitrol begon. Alles daarvoor is pre-periode. |
-| Meten vanaf | De dag waarop de uitrol klaar was en Google de pagina's heeft gezien. De dagen tussen livegang en meten vanaf blijven buiten de analyse. Een venster dat een veelvoud van 7 dagen is houdt het weekpatroon zuiver. |
+| Uitrolvenster | Geen, 7, 14 of 21 dagen (standaard 7): de tijd voor uitrol en recrawl na de livegang. Die dagen tellen niet mee. Het zijn hele weken, zodat het weekpatroon zuiver blijft. |
 | Model | *statsmodels* (standaard): snel en stabiel. *tfcausalimpact*: het originele Google-model; zie [Hoe het werkt](#hoe-het-werkt). |
 | Zekerheid | 80, 90 of 95%. Standaard de waarde uit `testconfig.json`, anders 90%. |
 | Placebotest | Draait hetzelfde model op een nepdatum in de pre-periode. Standaard aan. |
@@ -228,7 +228,7 @@ Volg het looptijdadvies uit stap 1. De pre-periode moet minimaal 14 meetpunten h
 
 Je kunt stap 2 tijdens de test zo vaak draaien als je wilt, bijvoorbeeld wekelijks via de GSC API. Is de meetperiode korter dan het looptijdadvies, dan toont de app **Tussenstand: dag X van Y**. Een tussenstand is geen eindoordeel: een effect dat vroeg significant lijkt kan nog verdwijnen. Stop pas als de geadviseerde looptijd erop zit.
 
-Na de eerste analyse kun je **Testconfig bijwerken** downloaden. Die bevat dan ook de livegang en de meetstart. Vervang je oude `testconfig.json` ermee; bij de volgende tussenstand staat alles direct goed.
+Na de eerste analyse kun je **Testconfig bijwerken** downloaden. Die bevat dan ook de livegang en het uitrolvenster. Vervang je oude `testconfig.json` ermee; bij de volgende tussenstand staat alles direct goed.
 
 ---
 
