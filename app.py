@@ -567,6 +567,16 @@ def step_analysis() -> None:
     metric = st.radio("Metric", list(metrics), format_func={"clicks": "Klikken", "impressions": "Vertoningen"}.get,
                       horizontal=True) if isinstance(metrics, dict) else None
     wide = metrics[metric] if metric else metrics
+    # The analysis period also applies to pasted/uploaded data (handy for an interim check).
+    full_range = (wide.index.min().date(), wide.index.max().date())
+    wide = wide.loc[str(f.start):str(f.end)]
+    if wide.empty:
+        st.error(f"Geen data binnen de analyseperiode {f.start:%d-%m-%Y} t/m {f.end:%d-%m-%Y}. "
+                 f"De data loopt van {full_range[0]:%d-%m-%Y} t/m {full_range[1]:%d-%m-%Y}.")
+        return
+    if (wide.index.min().date(), wide.index.max().date()) != full_range:
+        st.caption(f"Analyse op {wide.index.min():%d-%m-%Y} t/m {wide.index.max():%d-%m-%Y} "
+                   f"(data loopt van {full_range[0]:%d-%m-%Y} t/m {full_range[1]:%d-%m-%Y}; afgekapt op de analyseperiode).")
     cols = list(wide.columns)
     c1, c2, c3 = st.columns(3)
     with c1:
@@ -584,14 +594,20 @@ def step_analysis() -> None:
             return None
         return d if idx.min().date() <= d <= idx.max().date() else None
 
-    default_live = _in_range(test_cfg.get("livegang")) or idx[int(len(idx) * 0.66)].date()
+    lo_d, hi_d = idx.min().date(), idx.max().date()
+
+    def _keep(key: str, fallback, low, high) -> None:
+        """Keep the user's choice across reruns; fall back only when it is missing
+        or falls outside the data (a value outside min/max would crash the widget)."""
+        cur = ss.get(key)
+        if not isinstance(cur, date) or not (low <= cur <= high):
+            ss[key] = min(max(fallback, low), high)
+
+    _keep("a_live", _in_range(test_cfg.get("livegang")) or idx[int(len(idx) * 0.66)].date(), lo_d, hi_d)
     with c2:
-        live = st.date_input("Livegang (start uitrol)", value=default_live, min_value=idx.min().date(),
-                             max_value=idx.max().date(), format="DD-MM-YYYY", key=f"a_live_{default_live}")
-        default_post = _in_range(test_cfg.get("meten_vanaf")) or live
-        default_post = max(default_post, live)
-        post = st.date_input("Meten vanaf", value=default_post, min_value=live, max_value=idx.max().date(), format="DD-MM-YYYY",
-                             key=f"a_post_{default_post}",
+        live = st.date_input("Livegang (start uitrol)", min_value=lo_d, max_value=hi_d, format="DD-MM-YYYY", key="a_live")
+        _keep("a_post", max(_in_range(test_cfg.get("meten_vanaf")) or live, live), live, hi_d)
+        post = st.date_input("Meten vanaf", min_value=live, max_value=hi_d, format="DD-MM-YYYY", key="a_post",
                              help="Dagen tussen livegang en deze datum (uitrol, recrawl) blijven buiten de analyse.")
     with c3:
         engines = ["statsmodels", "tfcausalimpact"]

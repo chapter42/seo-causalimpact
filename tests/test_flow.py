@@ -259,3 +259,34 @@ def test_app_duration_and_interim():
     at.button[[b.label for b in at.button].index("▶︎ Analyse draaien")].click().run()
     assert not at.exception
     assert any("Tussenstand" in i.value for i in at.info)
+
+
+def test_voorbeelddata_walkthrough():
+    """Follows voorbeelddata/LEESMIJ.md step by step."""
+    vd = Path(APP).parent / "voorbeelddata"
+    at = AppTest.from_file(APP, default_timeout=300).run()
+    at.radio(key="g_source").set_value("BigQuery (query + plakken)").run()
+    at.date_input(key="g_start").set_value(date(2026, 6, 1))
+    at.date_input(key="g_end").set_value(date(2026, 8, 30))
+    at.text_area(key="g_pt").input("pdp = /p/\nlijst = /l/\ninfo = /inf/")
+    at.text_area(key="g_bq_paste").input((vd / "stap1_pre_periode.csv").read_text()).run()
+    at.button(key="g_bq_go").click().run()
+    at.button[[b.label for b in at.button].index("▶︎ Maak groepen")].click().run()
+    assert not at.exception
+    mine = at.session_state["g_result"].assignments[["url", "groep"]].sort_values("url").reset_index(drop=True)
+    ref = pd.read_csv(vd / "indeling.csv")[["url", "groep"]].sort_values("url").reset_index(drop=True)
+    assert mine.equals(ref)
+
+    at.sidebar.radio[0].set_value("2 · Effect meten").run()
+    at.text_area(key="a_bq_paste").input((vd / "stap2_groepstotalen_met_effect.csv").read_text()).run()
+    at.button(key="a_bq_go").click().run()
+    at.date_input(key="a_live").set_value(date(2026, 8, 31)).run()
+    at.date_input(key="a_post").set_value(date(2026, 9, 7)).run()
+    at.button[[b.label for b in at.button].index("▶︎ Analyse draaien")].click().run()
+    k = at.session_state["a_result"][0].kpis
+    assert k["significant"] and 0.04 < k["rel_effect"] < 0.07
+
+    at.date_input(key="a_end").set_value(date(2026, 9, 20)).run()
+    assert at.date_input(key="a_live").value == date(2026, 8, 31)  # choice survives
+    at.button[[b.label for b in at.button].index("▶︎ Analyse draaien")].click().run()
+    assert any("Tussenstand: dag 14 van 21" in i.value for i in at.info)

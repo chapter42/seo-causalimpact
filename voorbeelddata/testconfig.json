@@ -1,0 +1,62 @@
+{
+  "aangemaakt": "2026-08-31T09:00:00",
+  "bron": {
+    "type": "BigQuery (query + plakken)",
+    "table": "voorbeeld-project.searchconsole.searchdata_url_impression",
+    "property": null,
+    "start": "2026-06-01",
+    "end": "2026-08-30",
+    "countries": [
+      "nld"
+    ],
+    "devices": [],
+    "search_type": "WEB",
+    "include_patterns": [],
+    "exclude_patterns": [],
+    "granularity": "day"
+  },
+  "paginatypes": [
+    [
+      "pdp",
+      "/p/"
+    ],
+    [
+      "lijst",
+      "/l/"
+    ],
+    [
+      "info",
+      "/inf/"
+    ]
+  ],
+  "indeling": {
+    "group_names": [
+      "controle",
+      "test"
+    ],
+    "traffic_bins": 4,
+    "use_trend": true,
+    "min_clicks": 1.0,
+    "min_impressions": 0.0,
+    "max_url_share": 0.02,
+    "seed": 42,
+    "max_attempts": 50,
+    "smd_max": 0.1,
+    "corr_min": 0.9,
+    "trend_p_min": 0.2,
+    "placebo_max": 0.03,
+    "planned_post_periods": 42,
+    "seed_used": 44,
+    "geslaagd": true
+  },
+  "aantallen": {
+    "controle": 198,
+    "test": 198
+  },
+  "zekerheid": 90,
+  "looptijd": {
+    "verwacht_effect": 0.05,
+    "advies_weken": 3,
+    "haalbaar": true
+  }
+}

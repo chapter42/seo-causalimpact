@@ -50,7 +50,7 @@ De app opent op http://localhost:8501.
 
 Gebruik steeds `.venv/bin/python -m ...`. Dan gebruiken pip en Streamlit gegarandeerd dezelfde Python, en heb je geen last van de Homebrew-melding *externally-managed-environment*.
 
-Wil je eerst zien hoe het werkt? Kies in stap 1 en 2 als bron **Demodata**.
+Wil je eerst zien hoe het werkt? Kies in stap 1 en 2 als bron **Demodata**, of loop een complete testcase door met de bestanden in [`voorbeelddata/`](voorbeelddata/LEESMIJ.md): een pre-periode, een indeling en data met en zonder effect.
 
 ---
 
@@ -215,6 +215,7 @@ Bij url-data toont de app welk deel van de url's uit de indeling in de data is g
 | Metric | Klikken of vertoningen. Klikken zijn het meest zakelijk, vertoningen reageren sneller op rankingwijzigingen. |
 | Testgroep | De groep met de wijziging. |
 | Controle | Normaal alleen `controle`. Andere testgroepen zijn zelf beïnvloed en horen hier niet. |
+| Analyseperiode | Van welke tot welke datum de data meetelt. Geldt ook voor geplakte en geüploade tabellen, dus je kunt er een tussenstand mee nabootsen. |
 | Livegang | De dag waarop de uitrol begon. Alles daarvoor is pre-periode. |
 | Meten vanaf | De dag waarop de uitrol klaar was en Google de pagina's heeft gezien. De dagen tussen livegang en meten vanaf blijven buiten de analyse. Een venster dat een veelvoud van 7 dagen is houdt het weekpatroon zuiver. |
 | Model | *statsmodels* (standaard): snel en stabiel. *tfcausalimpact*: het originele Google-model; zie [Hoe het werkt](#hoe-het-werkt). |
@@ -360,6 +361,8 @@ core/gsc_api.py            inloggen (gcloud of JSON-key) en de Search Console AP
 core/bq_discovery.py       GSC-exports vinden in BigQuery
 core/data_io.py            plakken en uploaden, normaliseren, NL-getallen, demodata
 scripts/nieuwe-klant.sh    serviceaccount per klant, zonder sleutel
+scripts/maak_voorbeelddata.py  maakt voorbeelddata/
+voorbeelddata/             testcase om de app te proberen (zie LEESMIJ.md)
 serviceaccounts.example.txt voorbeeld voor serviceaccounts.txt
 tests/test_flow.py         tests
 ```
