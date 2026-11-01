@@ -320,8 +320,9 @@ def step_groups() -> None:
                                     help="Url's die meer dan dit deel van alle klikken halen zijn uitschieters en gaan eruit.")
     with c4:
         per = "dagen" if dio.infer_granularity(long["date"]) == "day" else "weken"
-        planned = st.number_input(f"Geplande looptijd test ({per})", 1, value=42 if per == "dagen" else 6,
-                                  help="Voor de indicatieve MDE: het kleinste effect dat je met deze opzet kunt aantonen.")
+        st.select_slider("Zekerheid", [80, 90, 95], value=90, key="g_zekerheid", format_func=lambda v: f"{v}%",
+                         help="Hoe zeker je wilt zijn voordat je een effect echt noemt. Voor SEO is 80 tot 90% gangbaar. "
+                              "Geldt voor het looptijdadvies en (via testconfig.json) voor de analyse in stap 2.")
         attempts = st.number_input("Max. pogingen", 1, 500, 50)
     with st.expander("Drempels voor de toetsen"):
         t1, t2, t3, t4 = st.columns(4)
@@ -335,7 +336,6 @@ def step_groups() -> None:
             group_names=names, page_types=ss.g_page_types, traffic_bins=bins, use_trend=use_trend,
             min_clicks=min_clicks, max_url_share=max_share / 100, seed=int(seed), max_attempts=int(attempts),
             smd_max=smd_max, corr_min=corr_min, trend_p_min=trend_p, placebo_max=placebo / 100,
-            planned_post_periods=int(planned),
         )
         try:
             with st.spinner("Groepen verdelen en toetsen…"):
@@ -347,6 +347,48 @@ def step_groups() -> None:
 
     if "g_result" in ss:
         show_group_result(ss.g_result, ss.g_cfg)
+
+
+def duration_advice(r: grp.GroupingResult, cfg: grp.GroupingConfig) -> tuple[dict, float, int]:
+    """Looptijdadvies: shortest test length at which the expected effect is detectable."""
+    from core import duration as du
+
+    st.subheader("Looptijdadvies")
+    zek = int(ss.get("g_zekerheid", 90))
+    c1, c2 = st.columns([1, 3])
+    expected = c1.number_input("Verwacht effect (%)", 0.5, 50.0, 5.0, 0.5, key="g_expected",
+                               help="Het effect dat je realistisch verwacht van de wijziging, op klikken.") / 100
+    key = (r.seed_used, zek, tuple(cfg.group_names), len(r.series), float(r.series.values.sum()))
+    if ss.get("g_curve_key") != key:
+        with st.spinner("Looptijd doorrekenen met het analysemodel…"):
+            ss.g_curve = du.combined_curve(r.series, cfg.group_names, alpha=1 - zek / 100)
+        ss.g_curve_key = key
+    curve = ss.g_curve
+    advice = du.advise(curve, expected)
+    with c2:
+        if advice["haalbaar"]:
+            st.success(
+                f"**Advies: {du.weeks_to_text(advice['weken'])} meten.** Dan is een effect van {nl_pct(expected, sign=False)} "
+                f"met {zek}% zekerheid aantoonbaar; vanaf {nl_pct(advice['mde'], sign=False)} vind je het in 4 van de 5 gevallen."
+            )
+        else:
+            st.warning(
+                f"**Een effect van {nl_pct(expected, sign=False)} is met deze groepen niet betrouwbaar aan te tonen.** "
+                f"Het beste haalbare is {nl_pct(advice['beste_mde'], sign=False)}, bij {du.weeks_to_text(advice['beste_weken'])}. "
+                "Langer meten helpt niet: de voorspelling wordt verder vooruit juist onzekerder. "
+                "Opties: meer url's in de test, meten op vertoningen in plaats van klikken, of alleen testen als je een groter effect verwacht."
+            )
+        if advice["haalbaar"] and advice["beste_weken"] > advice["weken"]:
+            st.caption(f"Het scherpst meet je bij {du.weeks_to_text(advice['beste_weken'])} "
+                       f"(vanaf {nl_pct(advice['beste_mde'], sign=False)}); daarna wordt de voorspelling onzekerder.")
+        st.caption("Tel daar de uitrol- en recrawltijd bij op (meestal 1 tot 2 weken). "
+                   "Stop niet eerder omdat een tussenstand al significant lijkt: dan meet je vooral ruis.")
+    chart = pd.DataFrame({
+        "Kleinste aantoonbare effect (%)": curve["mde"].to_numpy() * 100,
+        "Verwacht effect (%)": expected * 100,
+    }, index=pd.Index(curve["weken"], name="Looptijd (weken)"))
+    st.line_chart(chart, width="stretch")
+    return advice, expected, zek
 
 
 def show_group_result(r: grp.GroupingResult, cfg: grp.GroupingConfig) -> None:
@@ -373,15 +415,13 @@ def show_group_result(r: grp.GroupingResult, cfg: grp.GroupingConfig) -> None:
                      width="stretch", hide_index=True)
     with c2:
         st.markdown("**Toetsen op de reeksen**")
-        ck = r.checks.copy()
+        ck = r.checks.drop(columns=["mde_indicatief"], errors="ignore")
         for col in ["ok_correlatie", "ok_trend", "ok_placebo"]:
             ck[col] = ck[col].map({True: "✅", False: "❌"})
         st.dataframe(fmt_table(ck, {
             "correlatie": lambda v: nl(v, 3), "trendverschil_per_week": nl_pct, "trend_p": lambda v: nl(v, 2),
-            "placebo_effect": nl_pct, "mde_indicatief": lambda v: nl_pct(v, sign=False),
+            "placebo_effect": nl_pct,
         }), width="stretch", hide_index=True)
-        st.caption("MDE indicatief: kleinste relatieve effect dat je met deze groepen en looptijd waarschijnlijk "
-                   "aantoont (80% power). Het is een ondergrens; reken in de praktijk op meer.")
 
     st.markdown("**Groepen in de pre-periode (geïndexeerd, gemiddelde = 100)**")
     st.line_chart(r.series / r.series.mean() * 100, width="stretch")
@@ -392,6 +432,8 @@ def show_group_result(r: grp.GroupingResult, cfg: grp.GroupingConfig) -> None:
     if len(r.excluded):
         with st.expander(f"Uitgesloten url's ({nl(len(r.excluded))})"):
             st.dataframe(r.excluded[["url", "clicks", "impressions", "reden"]], width="stretch", hide_index=True)
+
+    advice, expected, zek = duration_advice(r, cfg)
 
     f: sb.SourceFilters = ss.g_filters
     config = {
@@ -405,7 +447,10 @@ def show_group_result(r: grp.GroupingResult, cfg: grp.GroupingConfig) -> None:
         "paginatypes": cfg.page_types,
         "indeling": {k: v for k, v in cfg.__dict__.items() if k != "page_types"} | {"seed_used": r.seed_used, "geslaagd": r.passed},
         "aantallen": {g: int(n) for g, n in a["groep"].value_counts().items()},
+        "zekerheid": zek,
+        "looptijd": {"verwacht_effect": expected, "advies_weken": advice.get("weken"), "haalbaar": advice["haalbaar"]},
     }
+    ss.g_config = config
 
     st.subheader("Export")
     st.caption("Bewaar indeling.csv en testconfig.json bij de test: stap 2 heeft ze nodig. "
@@ -444,6 +489,8 @@ def step_analysis() -> None:
     cfg = dio.load_config(up_c.getvalue()) if up_c else None
     if use_session:
         assignments = ss.g_result.assignments[["url", "groep"]]
+        if cfg is None and "g_config" in ss:
+            cfg = ss.g_config
         if cfg is None:
             f = ss.g_filters
             cfg = {"bron": {**f.__dict__, "start": str(f.start), "end": str(f.end), "table": f.full_table()},
@@ -528,17 +575,33 @@ def step_analysis() -> None:
                                   default=[c for c in cols if c != treated][:1],
                                   help="Normaal alleen 'controle'. Andere testgroepen zijn zelf beïnvloed en horen hier niet.")
     idx = wide.index
-    default_live = idx[int(len(idx) * 0.66)].date()
+    test_cfg = (cfg or {}).get("test", {})
+
+    def _in_range(d):
+        try:
+            d = date.fromisoformat(d)
+        except (TypeError, ValueError):
+            return None
+        return d if idx.min().date() <= d <= idx.max().date() else None
+
+    default_live = _in_range(test_cfg.get("livegang")) or idx[int(len(idx) * 0.66)].date()
     with c2:
         live = st.date_input("Livegang (start uitrol)", value=default_live, min_value=idx.min().date(),
-                             max_value=idx.max().date(), format="DD-MM-YYYY")
-        post = st.date_input("Meten vanaf", value=live, min_value=live, max_value=idx.max().date(), format="DD-MM-YYYY",
+                             max_value=idx.max().date(), format="DD-MM-YYYY", key=f"a_live_{default_live}")
+        default_post = _in_range(test_cfg.get("meten_vanaf")) or live
+        default_post = max(default_post, live)
+        post = st.date_input("Meten vanaf", value=default_post, min_value=live, max_value=idx.max().date(), format="DD-MM-YYYY",
+                             key=f"a_post_{default_post}",
                              help="Dagen tussen livegang en deze datum (uitrol, recrawl) blijven buiten de analyse.")
     with c3:
         engines = ["statsmodels", "tfcausalimpact"]
         engine = st.selectbox("Model", engines, help="statsmodels: snel en stabiel. tfcausalimpact: het Google-model, "
                               "draait apart met een tijdslimiet en valt terug op statsmodels als het vastloopt.")
-        alpha = st.select_slider("α", [0.01, 0.05, 0.10], value=0.05)
+        zek_default = int((cfg or {}).get("zekerheid", 90))
+        zek = st.select_slider("Zekerheid", [80, 90, 95], value=zek_default if zek_default in (80, 90, 95) else 90,
+                               format_func=lambda v: f"{v}%", key="a_zekerheid",
+                               help="Hoe zeker je wilt zijn voordat je een effect echt noemt. Standaard uit testconfig.json.")
+        alpha = 1 - zek / 100
         do_placebo = st.checkbox("Placebotest in de pre-periode", True)
 
     st.line_chart(wide[[treated, *controls]], width="stretch")
@@ -555,7 +618,12 @@ def step_analysis() -> None:
         except Exception as exc:  # noqa: BLE001
             st.error(f"Analyse mislukt: {exc}")
             return
-        ss.a_result = (res, pl, treated, metric or "waarde")
+        meta = {
+            "zekerheid": zek,
+            "advies_weken": ((cfg or {}).get("looptijd") or {}).get("advies_weken"),
+            "cfg": cfg, "live": str(live), "post": str(post),
+        }
+        ss.a_result = (res, pl, treated, metric or "waarde", meta)
 
     if "a_result" in ss:
         show_impact(*ss.a_result)
@@ -587,14 +655,14 @@ def table_to_wide(tbl: pd.DataFrame, assignments: pd.DataFrame):
         return None
 
 
-def verdict(k: dict, metric: str, pl: im.ImpactResult | None, fit: dict, unit: str) -> str:
+def verdict(k: dict, metric: str, pl: im.ImpactResult | None, fit: dict, unit: str, zek: int) -> str:
     rel, lo, hi = nl_pct(k["rel_effect"]), nl_pct(k["rel_effect_lower"]), nl_pct(k["rel_effect_upper"])
     n = k["n_post"]
     if k["significant"]:
         direction = "meer" if k["rel_effect"] > 0 else "minder"
-        txt = (f"**De testgroep haalde {rel} {metric} ten opzichte van de verwachting** "
+        txt = (f"**Met {zek}% zekerheid een effect: de testgroep haalde {rel} {metric} ten opzichte van de verwachting** "
                f"(bandbreedte {lo} tot {hi}). Dat is {nl(k['abs_effect_cum'], sign=True)} {metric} "
-               f"{direction} over {nl(n)} {unit}. De kans dat dit toeval is, is {nl(k['p_value'] * 100, 1)}%.")
+               f"{direction} over {nl(n)} {unit}.")
     else:
         txt = (f"**Geen aantoonbaar effect.** De beste schatting is {rel}, maar de bandbreedte ({lo} tot {hi}) "
                f"omvat nul. Een effect kleiner dan ongeveer {nl_pct(max(abs(k['rel_effect_lower']), abs(k['rel_effect_upper'])), sign=False)} "
@@ -608,19 +676,37 @@ def verdict(k: dict, metric: str, pl: im.ImpactResult | None, fit: dict, unit: s
     return txt
 
 
-def show_impact(res: im.ImpactResult, pl: im.ImpactResult | None, treated: str, metric: str) -> None:
+def show_impact(res: im.ImpactResult, pl: im.ImpactResult | None, treated: str, metric: str, meta: dict | None = None) -> None:
+    meta = meta or {}
     k = res.kpis
     label = {"clicks": "klikken", "impressions": "vertoningen"}.get(metric, metric)
-    unit = "dagen" if im._is_daily(res.frame.index) else "weken"
+    daily = im._is_daily(res.frame.index)
+    unit = "dagen" if daily else "weken"
+    zek = int(meta.get("zekerheid", round((1 - k["alpha"]) * 100)))
+
+    # Interim check: shorter than the advised duration?
+    weeks = meta.get("advies_weken")
+    if weeks:
+        done = k["n_post"] if daily else k["n_post"] * 7
+        target = weeks * 7
+        if done < target:
+            st.info(
+                f"**Tussenstand: dag {nl(done)} van {nl(target)}** (advies {weeks} weken). "
+                "Dit is nog geen eindoordeel. Een effect dat nu al significant lijkt kan nog verdwijnen, "
+                "en een effect dat nu ontbreekt kan nog verschijnen. Stop pas als de geadviseerde looptijd erop zit."
+            )
+        else:
+            st.caption(f"Geadviseerde looptijd ({weeks} weken) is gehaald: dit is het eindoordeel.")
     for w in res.warnings:
         st.caption("• " + w)
-    st.markdown(verdict(k, label, pl, res.pre_fit, unit))
+    st.markdown(verdict(k, label, pl, res.pre_fit, unit, zek))
 
     m = st.columns(4)
     m[0].metric("Relatief effect", nl_pct(k["rel_effect"]), help=f"Bandbreedte {nl_pct(k['rel_effect_lower'])} tot {nl_pct(k['rel_effect_upper'])}")
     m[1].metric(f"Cumulatief ({label})", nl(k["abs_effect_cum"], sign=True),
                 help=f"Bandbreedte {nl(k['abs_effect_cum_lower'], sign=True)} tot {nl(k['abs_effect_cum_upper'], sign=True)}")
-    m[2].metric("p-waarde", nl(k["p_value"], 3), help="Kans op dit resultaat (of extremer) zonder echt effect.")
+    m[2].metric("p-waarde", nl(k["p_value"], 3),
+                help=f"Kans op dit resultaat (of extremer) zonder echt effect. Significant bij p < {nl(1 - zek / 100, 2)} ({zek}% zekerheid).")
     m[3].metric("Pre-periode fit", f"r = {nl(res.pre_fit.get('corr', np.nan), 3)}",
                 help=f"Gemiddelde afwijking (MAPE) {nl_pct(res.pre_fit.get('mape', np.nan), sign=False)}")
 
@@ -646,6 +732,15 @@ def show_impact(res: im.ImpactResult, pl: im.ImpactResult | None, treated: str, 
     d2.download_button("⬇︎ KPI's (JSON)", json.dumps(out, indent=2, default=float), "causal_impact_kpis.json",
                        "application/json", width="stretch")
     d3.download_button("⬇︎ Reeksen (CSV)", res.frame.to_csv(), "causal_impact_reeksen.csv", "text/csv", width="stretch")
+
+    cfg = meta.get("cfg")
+    if cfg:
+        updated = {**cfg, "zekerheid": zek, "test": {**cfg.get("test", {}), "livegang": meta["live"], "meten_vanaf": meta["post"]}}
+        st.download_button(
+            "⬇︎ Testconfig bijwerken (met livegang en meetstart)", dio.dump_config(updated), "testconfig.json",
+            "application/json", width="stretch",
+            help="Vervang je oude testconfig.json hiermee. Bij de volgende tussenstand staan de datums dan meteen goed.",
+        )
 
 
 # =============================================================================

@@ -142,7 +142,7 @@ Bij BigQuery vul je de tabel in (`project.dataset` of de volledige tabelnaam), o
 | Stratificeer ook op trend | aan | Url's die stijgen, stabiel zijn of dalen worden eerlijk verdeeld. |
 | Min. klikken per url | 10 | Url's met minder klikken in de pre-periode gaan eruit. Ze voegen vooral ruis toe. |
 | Max. aandeel per url | 2% | Url's die meer dan dit deel van alle klikken halen zijn uitschieters en gaan eruit. Eén uitschieter in één groep kan een test kapotmaken. |
-| Geplande looptijd | 42 dagen / 6 weken | Alleen voor de MDE-schatting (zie onder). |
+| Zekerheid | 90% | Hoe zeker je wilt zijn voordat je een effect echt noemt: 80, 90 of 95%. Voor SEO is 80 tot 90% gangbaar. Geldt voor het looptijdadvies en gaat via `testconfig.json` mee naar stap 2. |
 | Max. pogingen | 50 | Hoe vaak de app opnieuw verdeelt als de toetsen niet slagen. |
 
 ### De toetsen
@@ -155,11 +155,21 @@ Per testgroep vergeleken met de controle. De drempels zijn aan te passen onder *
 | Correlatie van de reeksen | ≥ 0,90 | De controle beweegt mee met de testgroep en kan hem dus voorspellen. |
 | Parallelle trend | p ≥ 0,20 | De verhouding test/controle loopt in de pre-periode niet al uit elkaar. |
 | A/A-placebo | \|effect\| ≤ 3% | Doe je alsof de test op 70% van de pre-periode begon, dan vind je niets. |
-| MDE (indicatief) | geen drempel | Het kleinste effect dat je met deze groepen en looptijd waarschijnlijk aantoont (80% power, gecorrigeerd voor autocorrelatie). Zie het als ondergrens. |
 
 Haalt een indeling niet alles, dan verdeelt de app opnieuw met een volgende seed. Lukt het na het maximum aantal pogingen niet, dan kiest hij de best scorende indeling en meldt hij welke toets faalt. Lage correlatie betekent meestal te weinig verkeer per groep: verruim de scope of meet per week.
 
 Onder de toetsen staan de groepen in de pre-periode als lijn (geïndexeerd op 100), de verdeling per stratum en de uitgesloten url's met de reden.
+
+### Looptijdadvies
+
+Vul in welk effect je verwacht (standaard 5%). De app rekent met hetzelfde model als de analyse in stap 2 uit wat het kleinste aantoonbare effect is bij een looptijd van 2 tot 12 weken, en toont dat als lijn naast je verwachte effect.
+
+- **Advies:** de kortste looptijd in hele weken (minimaal 3) waarbij je verwachte effect met de gekozen zekerheid aantoonbaar is. Een effect van precies die grootte vind je dan in 4 van de 5 gevallen (80% power).
+- **Langer is niet altijd beter.** Het kleinste aantoonbare effect daalt eerst en loopt daarna weer op, omdat de voorspelling verder vooruit onzekerder wordt. Ligt het scherpste punt later dan het advies, dan meldt de app dat.
+- **Niet haalbaar?** Dan toont de app het beste haalbare effect en bij welke looptijd. Opties: meer url's in de test, meten op vertoningen, of alleen testen als je een groter effect verwacht.
+- Tel de uitrol- en recrawltijd erbij op, meestal 1 tot 2 weken.
+
+Het advies gaat mee in `testconfig.json`. Stap 2 gebruikt het om tussenstanden te herkennen.
 
 ---
 
@@ -168,7 +178,7 @@ Onder de toetsen staan de groepen in de pre-periode als lijn (geïndexeerd op 10
 | Download | Waarvoor |
 |---|---|
 | **Indeling, alle groepen (CSV)** | `url, groep, stratum, page_type` plus de pre-cijfers. Dit is de input voor stap 2. Bewaar hem. |
-| **Testconfig (JSON)** | Alle filters, paginatypes, instellingen, de gebruikte seed en (bij de GSC API) de property. Stap 2 vult hiermee alles in. Bewaar hem bij de indeling. |
+| **Testconfig (JSON)** | Alle filters, paginatypes, instellingen, de gebruikte seed, (bij de GSC API) de property, de zekerheid en het looptijdadvies. Stap 2 vult hiermee alles in. Bewaar hem bij de indeling. |
 | **Een lijst per groep (TXT)** | Eén url per regel. De lijst van de **testgroep** gaat naar wie de wijziging doorvoert. De lijst van de **controle** is de groep die tijdens de test niet aangeraakt mag worden: geef hem mee, zodat niemand daar per ongeluk ook iets wijzigt of hem in een andere test gebruikt. |
 
 Onder de downloads kun je elke lijst ook direct kopiëren.
@@ -185,7 +195,7 @@ Tijdens de test:
 
 ### Indeling inlezen
 
-Gebruik de indeling uit stap 1 (zelfde sessie), of upload `indeling.csv`. Upload ook `testconfig.json`: dan staan periode, landen, patronen en tabel meteen goed, en stelt de app de property van stap 1 voor.
+Gebruik de indeling uit stap 1 (zelfde sessie), of upload `indeling.csv`. Upload ook `testconfig.json`: dan staan periode, landen, patronen, tabel, zekerheid en (na een eerste tussenstand) livegang en meetstart meteen goed, en stelt de app de property van stap 1 voor.
 
 ### Bron kiezen
 
@@ -208,10 +218,16 @@ Bij url-data toont de app welk deel van de url's uit de indeling in de data is g
 | Livegang | De dag waarop de uitrol begon. Alles daarvoor is pre-periode. |
 | Meten vanaf | De dag waarop de uitrol klaar was en Google de pagina's heeft gezien. De dagen tussen livegang en meten vanaf blijven buiten de analyse. Een venster dat een veelvoud van 7 dagen is houdt het weekpatroon zuiver. |
 | Model | *statsmodels* (standaard): snel en stabiel. *tfcausalimpact*: het originele Google-model; zie [Hoe het werkt](#hoe-het-werkt). |
-| α | Significantieniveau, standaard 0,05. |
+| Zekerheid | 80, 90 of 95%. Standaard de waarde uit `testconfig.json`, anders 90%. |
 | Placebotest | Draait hetzelfde model op een nepdatum in de pre-periode. Standaard aan. |
 
-Een post-periode van minimaal 3 tot 6 weken is in SEO gebruikelijk. De pre-periode moet minimaal 14 meetpunten hebben.
+Volg het looptijdadvies uit stap 1. De pre-periode moet minimaal 14 meetpunten hebben.
+
+### Tussenstanden
+
+Je kunt stap 2 tijdens de test zo vaak draaien als je wilt, bijvoorbeeld wekelijks via de GSC API. Is de meetperiode korter dan het looptijdadvies, dan toont de app **Tussenstand: dag X van Y**. Een tussenstand is geen eindoordeel: een effect dat vroeg significant lijkt kan nog verdwijnen. Stop pas als de geadviseerde looptijd erop zit.
+
+Na de eerste analyse kun je **Testconfig bijwerken** downloaden. Die bevat dan ook de livegang en de meetstart. Vervang je oude `testconfig.json` ermee; bij de volgende tussenstand staat alles direct goed.
 
 ---
 
@@ -221,9 +237,9 @@ Bovenaan staat een conclusie in gewone taal. Daaronder:
 
 | Onderdeel | Betekenis |
 |---|---|
-| Relatief effect | Hoeveel procent de testgroep boven of onder de verwachting zat, met de bandbreedte (95%-interval). Omvat de bandbreedte nul, dan is er geen aantoonbaar effect. |
+| Relatief effect | Hoeveel procent de testgroep boven of onder de verwachting zat, met de bandbreedte bij de gekozen zekerheid. Omvat de bandbreedte nul, dan is er geen aantoonbaar effect. |
 | Cumulatief | Het totaal aantal extra (of minder) klikken over de hele meetperiode. |
-| p-waarde | De kans op dit resultaat zonder echt effect. Onder α heet het significant. |
+| p-waarde | De kans op dit resultaat (of extremer) zonder echt effect, tweezijdig. Significant als p kleiner is dan 1 − zekerheid, bijvoorbeeld 0,10 bij 90%. Dat is precies hetzelfde als: de bandbreedte bevat geen nul. |
 | Pre-periode fit | Hoe goed de controle de testgroep vóór de test voorspelde (correlatie en gemiddelde afwijking). Onder r = 0,9 is de voorspelling matig. |
 
 De grafiek heeft drie panelen:
@@ -308,6 +324,17 @@ Kan, maar zonder gcloud-login: die bestaat daar niet.
 
 Beide geven dezelfde uitkomsten en grafiek. Op de demodata met een ingebouwd effect van +8% vonden ze +8,0% (statsmodels) en +7,5% (tfcausalimpact); zonder ingebouwd effect +0,1%, niet significant.
 
+**IJking.** Voor elke analyse doet de app een paar keer alsof de test eerder in de pre-periode begon, en vergelijkt hoe ver de voorspelling ernaast zat met de bandbreedte die het model gaf. Was het model te zeker, dan wordt de bandbreedte breder (nooit smaller). De factor staat als `calibration` in de KPI-download.
+
+**Gemeten op 60 demodatasets** (4 weken meten, statsmodels):
+
+| Zekerheid | Onterecht een effect (doel: hoogstens) | Effect ter grootte van het advies gevonden (doel: 80%) |
+|---|---|---|
+| 90% | 8,3% (10%) | 82% |
+| 95% | 1,7% (5%) | 85% |
+
+Een eerdere versie gebruikte een eenzijdige p-waarde tegen een tweezijdige drempel; daardoor kwam "significant" twee keer zo vaak voor als ingesteld. Dat is hersteld, en de tests bewaken het.
+
 ### Queries
 
 Alle queries zijn losse `SELECT`'s op `searchdata_url_impression`, met filters op datum, zoektype, land, apparaat en url-patronen. De query van stap 2 bevat de indeling als `UNNEST`-lijsten; het gemeenschappelijke begin van de url's (schema en host) wordt eraf gehaald om de query klein te houden.
@@ -324,8 +351,9 @@ De tests controleren onder meer de balans van de indeling, dat een ingebouwd eff
 
 ```
 app.py                     Streamlit-app (zijbalk, stap 1 en 2)
-core/grouping.py           stratificatie, toewijzing, balanstoetsen, MDE
-core/impact.py             CausalImpact (statsmodels en tfcausalimpact), placebo, grafiek
+core/grouping.py           stratificatie, toewijzing, balanstoetsen
+core/duration.py           looptijdadvies
+core/impact.py             CausalImpact (statsmodels en tfcausalimpact), ijking, placebo, grafiek
 core/_tfci_worker.py       tfcausalimpact in een apart proces
 core/sql_builder.py        BigQuery-queries voor stap 1 en 2
 core/gsc_api.py            inloggen (gcloud of JSON-key) en de Search Console API

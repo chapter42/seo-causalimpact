@@ -78,7 +78,7 @@ def test_app_demo_flow():
     at.button[[b.label for b in at.button].index("▶︎ Analyse draaien")].click().run()
     assert not at.exception
     text = " ".join(m.value for m in at.markdown)
-    assert "De testgroep haalde" in text and "Placebotest" in text
+    assert "de testgroep haalde" in text and "Placebotest" in text
 
 
 def test_app_paste_bigquery_group_result():
@@ -103,7 +103,7 @@ def test_app_paste_bigquery_group_result():
     at.date_input[3].set_value(date(2026, 9, 7)).run()
     at.button[[b.label for b in at.button].index("▶︎ Analyse draaien")].click().run()
     assert not at.exception
-    assert "De testgroep haalde" in " ".join(mk.value for mk in at.markdown)
+    assert "de testgroep haalde" in " ".join(mk.value for mk in at.markdown)
 
 
 def test_gcloud_login_errors_and_impersonation(monkeypatch):
@@ -223,3 +223,39 @@ def test_grouping_sql_shape():
     assert "QUALIFY" not in sql and "SUM(SUM(" not in sql
     assert "HAVING SUM(impressions) >= 100" in sql
     assert "r'/blog/'" in sql and "r\"it's\"" in sql and "'''" not in sql
+
+
+def test_two_sided_significance_matches_interval():
+    long, res = _groups()
+    w0 = dio.group_series(long, res.assignments)[["test", "controle"]]
+    k = im.run_impact(w0, "2026-09-01", "2026-09-07", alpha=0.10).kpis
+    excludes_zero = k["rel_effect_lower"] > 0 or k["rel_effect_upper"] < 0
+    assert k["significant"] == excludes_zero
+
+
+def test_duration_advice():
+    from core import duration as du
+    _, res = _groups()
+    curve = du.combined_curve(res.series, ["controle", "test"], alpha=0.10)
+    assert list(curve["weken"]) == list(range(2, 13))
+    assert (curve["mde"] > 0).all()
+    adv = du.advise(curve, 0.05)
+    assert adv["haalbaar"] and adv["weken"] >= du.MIN_WEEKS
+    assert not du.advise(curve, 0.0001)["haalbaar"]
+
+
+def test_app_duration_and_interim():
+    at = AppTest.from_file(APP, default_timeout=180).run()
+    at.radio(key="g_source").set_value("Demodata").run()
+    at.button[[b.label for b in at.button].index("Laad demodata")].click().run()
+    at.button[[b.label for b in at.button].index("▶︎ Maak groepen")].click().run()
+    assert not at.exception
+    assert any("Advies:" in s.value for s in at.success)
+    at.sidebar.radio[0].set_value("2 · Effect meten").run()
+    at.radio(key="a_source").set_value("Demodata").run()
+    at.button[[b.label for b in at.button].index("Laad demodata")].click().run()
+    at.date_input[2].set_value(date(2026, 10, 20)).run()
+    at.date_input[3].set_value(date(2026, 10, 20)).run()
+    at.button[[b.label for b in at.button].index("▶︎ Analyse draaien")].click().run()
+    assert not at.exception
+    assert any("Tussenstand" in i.value for i in at.info)

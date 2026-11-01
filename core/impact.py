@@ -89,8 +89,12 @@ def _kpis_from_sims(y_post: np.ndarray, sims: np.ndarray, alpha: float) -> dict:
     eff_sum = y_post.sum() - pred_sum
     n = len(y_post)
     rel = eff_sum / np.where(pred_sum == 0, np.nan, pred_sum)
+    # Two-sided: twice the smaller tail. "Significant" (p < alpha) then means
+    # exactly that the (1 - alpha) interval excludes zero. A one-sided tail
+    # against a two-sided alpha doubled the false positives (measured: 20% at a
+    # nominal 10%).
     p_tail = min((pred_sum >= y_post.sum()).mean(), (pred_sum <= y_post.sum()).mean())
-    p_value = float(max(p_tail, 1 / (sims.shape[1] + 1)))
+    p_value = float(min(1.0, max(2 * p_tail, 1 / (sims.shape[1] + 1))))
     pred_mean_sum = float(np.mean(pred_sum))
     return {
         "actual_avg": float(y_post.mean()),
@@ -114,32 +118,88 @@ def _kpis_from_sims(y_post: np.ndarray, sims: np.ndarray, alpha: float) -> dict:
 
 
 # --- Engine: statsmodels --------------------------------------------------------
-def _run_statsmodels(data: pd.DataFrame, n_pre: int, alpha: float, reps: int = 1000) -> ImpactResult:
+def _fit_and_simulate(y_pre: np.ndarray, X_pre: np.ndarray, X_future: np.ndarray, reps: int):
+    """Fit the structural model on the pre-period and simulate counterfactual paths.
+
+    Returns (fitted results, sims of shape (len(X_future), reps) in original
+    units, scale). Shared by the analysis and the duration advice so both use
+    exactly the same model.
+    """
     from statsmodels.tsa.statespace.structural import UnobservedComponents
 
-    y = data.iloc[:, 0].to_numpy(float)
-    X = data.iloc[:, 1:].to_numpy(float)
-    scale = max(float(np.mean(np.abs(y[:n_pre]))), 1e-9)
-    xs = X / np.where(np.abs(X[:n_pre]).mean(axis=0) == 0, 1, np.abs(X[:n_pre]).mean(axis=0))
-    ys = y / scale
+    scale = max(float(np.mean(np.abs(y_pre))), 1e-9)
+    xmean = np.abs(X_pre).mean(axis=0) if X_pre.shape[1] else np.ones(0)
+    xmean = np.where(xmean == 0, 1, xmean)
+    ys, xs_pre, xs_fut = y_pre / scale, X_pre / xmean, X_future / xmean
 
     # Mirrors CausalImpact's defaults: local level with a small, fixed level
     # variance (prior sd 0.01 × sd(y)) and no own seasonality, because the
     # control series already carry the weekly pattern. A free level variance or an
     # extra seasonal component lets the level absorb the effect (tested: biased).
-    season = season_length(data.index)
     with warnings.catch_warnings():
         warnings.simplefilter("ignore")
-        mod = UnobservedComponents(ys[:n_pre], level="local level", exog=xs[:n_pre] if X.shape[1] else None)
-        level_sd = 0.01 * float(np.std(ys[:n_pre]))
+        mod = UnobservedComponents(ys, level="local level", exog=xs_pre if X_pre.shape[1] else None)
+        level_sd = 0.01 * float(np.std(ys))
         res = mod.fit_constrained({"sigma2.level": level_sd ** 2}, disp=False, maxiter=1000)
-        pre_pred = res.get_prediction()
         np.random.seed(0)  # reproducible paths; passing random_state clashes with some pandas versions
         sims = res.simulate(
-            nsimulations=len(y) - n_pre, repetitions=reps, anchor="end",
-            exog=xs[n_pre:] if X.shape[1] else None,
+            nsimulations=len(X_future), repetitions=reps, anchor="end",
+            exog=xs_fut if X_pre.shape[1] else None,
         )
-    sims = np.asarray(sims).reshape(len(y) - n_pre, -1) * scale
+    return res, np.asarray(sims).reshape(len(X_future), -1) * scale, scale
+
+
+def calibration_factor(y_pre: np.ndarray, X_pre: np.ndarray, horizon: int, n_backtests: int = 6) -> float:
+    """How much wider the intervals must be, measured on the pre-period itself.
+
+    The model's intervals assume the future is as calm as the past noise. In SEO
+    data groups also drift apart slowly, so out-of-sample errors are larger than
+    the model thinks (measured on demo data: 23% false positives at a nominal
+    10%). We therefore backtest: start a fake test at several points in the
+    pre-period, forecast `horizon` periods, and compare the real error of the
+    total with the simulated spread. The factor is the RMS of those standardised
+    errors, never below 1 (we only widen) and capped at 4.
+    """
+    n = len(y_pre)
+    h = int(min(horizon, n // 4))
+    first = max(int(n * 0.5), 14)
+    last = n - h
+    if h < 3 or last <= first:
+        return 1.0
+    origins = np.unique(np.linspace(first, last, n_backtests).astype(int))
+    z = []
+    for t in origins:
+        try:
+            _, sims, _ = _fit_and_simulate(y_pre[:t], X_pre[:t], X_pre[t:t + h], reps=300)
+        except Exception:  # noqa: BLE001 — a failed backtest just does not count
+            continue
+        totals = sims.sum(axis=0)
+        sd = totals.std()
+        if sd > 0:
+            z.append((y_pre[t:t + h].sum() - totals.mean()) / sd)
+    if len(z) < 3:
+        return 1.0
+    return float(np.clip(np.sqrt(np.mean(np.square(z))), 1.0, 4.0))
+
+
+def _widen(sims: np.ndarray, factor: float) -> np.ndarray:
+    """Scale every simulated path's deviation from the mean path by `factor`."""
+    if factor == 1.0:
+        return sims
+    mean = sims.mean(axis=1, keepdims=True)
+    return mean + factor * (sims - mean)
+
+
+def _run_statsmodels(data: pd.DataFrame, n_pre: int, alpha: float, reps: int = 1000) -> ImpactResult:
+    y = data.iloc[:, 0].to_numpy(float)
+    X = data.iloc[:, 1:].to_numpy(float)
+    season = season_length(data.index)
+    res, sims, scale = _fit_and_simulate(y[:n_pre], X[:n_pre], X[n_pre:], reps)
+    factor = calibration_factor(y[:n_pre], X[:n_pre], len(y) - n_pre)
+    sims = _widen(sims, factor)
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        pre_pred = res.get_prediction()
 
     lo, hi = 100 * alpha / 2, 100 * (1 - alpha / 2)
     pre_mean = pre_pred.predicted_mean * scale
@@ -162,7 +222,9 @@ def _run_statsmodels(data: pd.DataFrame, n_pre: int, alpha: float, reps: int = 1
     frame["cum"] = np.r_[np.full(n_pre, np.nan), cum.mean(axis=1)]
     frame["cum_lower"] = np.r_[np.full(n_pre, np.nan), np.percentile(cum, lo, axis=1)]
     frame["cum_upper"] = np.r_[np.full(n_pre, np.nan), np.percentile(cum, hi, axis=1)]
-    return ImpactResult(frame=frame, kpis=_kpis_from_sims(y[n_pre:], sims, alpha), engine="statsmodels")
+    kpis = _kpis_from_sims(y[n_pre:], sims, alpha)
+    kpis["calibration"] = factor
+    return ImpactResult(frame=frame, kpis=kpis, engine="statsmodels")
 
 
 # --- Engine: tfcausalimpact (child process) -------------------------------------
@@ -221,7 +283,7 @@ def _run_tfci(data: pd.DataFrame, n_pre: int, alpha: float, timeout: int) -> Imp
 
     sd = out["summary_data"]
     v = lambda r, c: float(sd.loc[r, c])  # noqa: E731
-    p = out["p_value"]
+    p = min(1.0, 2 * out["p_value"])  # tfcausalimpact reports one tail; make it two-sided
     kpis = {
         "actual_avg": v("actual", "average"),
         "predicted_avg": v("predicted", "average"),
