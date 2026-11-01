@@ -191,7 +191,7 @@ def test_app_sidebar_pickers():
     assert not at.exception
     at.selectbox(key="bq_table").set_value("gsc-export-a.searchconsole.searchdata_url_impression").run()
     assert any("gsc-export-a.searchconsole" in t.value for t in at.text_input)
-    at.radio(key="g_source").set_value("GSC API (serviceaccount)").run()
+    at.radio(key="g_source").set_value("GSC API").run()
     assert not at.exception
     assert any("sc-domain:voorbeeld.nl" in c.value for c in at.caption)
 

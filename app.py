@@ -98,7 +98,7 @@ def service_account_ui() -> None:
             path = st.text_input("…of pad naar sleutel", value=default_path)
             creds_fn = lambda: gsc_api.credentials_from_json(up.getvalue()) if up else gsc_api.credentials_from_file(path)  # noqa: E731
 
-        if st.button("Verbinden", use_container_width=True):
+        if st.button("Verbinden", width="stretch"):
             try:
                 ss.creds = creds_fn()
                 ss.sites = gsc_api.list_sites(ss.creds)
@@ -263,7 +263,7 @@ def step_groups() -> None:
                "controlegroep en testgroep(en). De app toetst of de groepen vooraf gelijk genoeg zijn.")
 
     st.subheader("Selectie")
-    source = st.radio("Bron", ["BigQuery (query + plakken)", "GSC API (serviceaccount)", "Demodata"],
+    source = st.radio("Bron", ["BigQuery (query + plakken)", "GSC API", "Demodata"],
                       horizontal=True, key="g_source")
     defaults = default_filters()
     if source.startswith("BigQuery"):
@@ -330,7 +330,7 @@ def step_groups() -> None:
         trend_p = t3.number_input("Min. p parallelle trend", 0.0, 1.0, 0.20, 0.05)
         placebo = t4.number_input("Max. placebo-effect (%)", 0.0, 50.0, 3.0, 0.5)
 
-    if st.button("▶︎ Maak groepen", type="primary", use_container_width=True):
+    if st.button("▶︎ Maak groepen", type="primary", width="stretch"):
         cfg = grp.GroupingConfig(
             group_names=names, page_types=ss.g_page_types, traffic_bins=bins, use_trend=use_trend,
             min_clicks=min_clicks, max_url_share=max_share / 100, seed=int(seed), max_attempts=int(attempts),
@@ -362,7 +362,7 @@ def show_group_result(r: grp.GroupingResult, cfg: grp.GroupingConfig) -> None:
     tot = tot.reindex(cfg.group_names)
     tot["aandeel klikken"] = tot["klikken"] / tot["klikken"].sum()
     st.dataframe(fmt_table(tot, {"urls": nl, "klikken": nl, "vertoningen": nl, "aandeel klikken": lambda v: nl_pct(v, sign=False)}),
-                 use_container_width=True)
+                 width="stretch")
 
     c1, c2 = st.columns(2)
     with c1:
@@ -370,7 +370,7 @@ def show_group_result(r: grp.GroupingResult, cfg: grp.GroupingConfig) -> None:
         b = r.balance.copy()
         b["ok"] = b["ok"].map({True: "✅", False: "❌"})
         st.dataframe(fmt_table(b, {"controle": lambda v: nl(v, 3), "test": lambda v: nl(v, 3), "smd": lambda v: nl(v, 3)}),
-                     use_container_width=True, hide_index=True)
+                     width="stretch", hide_index=True)
     with c2:
         st.markdown("**Toetsen op de reeksen**")
         ck = r.checks.copy()
@@ -379,19 +379,19 @@ def show_group_result(r: grp.GroupingResult, cfg: grp.GroupingConfig) -> None:
         st.dataframe(fmt_table(ck, {
             "correlatie": lambda v: nl(v, 3), "trendverschil_per_week": nl_pct, "trend_p": lambda v: nl(v, 2),
             "placebo_effect": nl_pct, "mde_indicatief": lambda v: nl_pct(v, sign=False),
-        }), use_container_width=True, hide_index=True)
+        }), width="stretch", hide_index=True)
         st.caption("MDE indicatief: kleinste relatieve effect dat je met deze groepen en looptijd waarschijnlijk "
                    "aantoont (80% power). Het is een ondergrens; reken in de praktijk op meer.")
 
     st.markdown("**Groepen in de pre-periode (geïndexeerd, gemiddelde = 100)**")
-    st.line_chart(r.series / r.series.mean() * 100, use_container_width=True)
+    st.line_chart(r.series / r.series.mean() * 100, width="stretch")
 
     with st.expander("Strata"):
         st.dataframe(a.pivot_table(index="stratum", columns="groep", values="url", aggfunc="size", fill_value=0),
-                     use_container_width=True)
+                     width="stretch")
     if len(r.excluded):
         with st.expander(f"Uitgesloten url's ({nl(len(r.excluded))})"):
-            st.dataframe(r.excluded[["url", "clicks", "impressions", "reden"]], use_container_width=True, hide_index=True)
+            st.dataframe(r.excluded[["url", "clicks", "impressions", "reden"]], width="stretch", hide_index=True)
 
     f: sb.SourceFilters = ss.g_filters
     config = {
@@ -408,14 +408,20 @@ def show_group_result(r: grp.GroupingResult, cfg: grp.GroupingConfig) -> None:
     }
 
     st.subheader("Export")
-    d1, d2, d3 = st.columns(3)
-    d1.download_button("⬇︎ Indeling (CSV)", a.to_csv(index=False), "indeling.csv", "text/csv", use_container_width=True)
+    st.caption("Bewaar indeling.csv en testconfig.json bij de test: stap 2 heeft ze nodig. "
+               "De lijsten per groep zijn voor de uitvoering: de testgroep krijgt de wijziging, de controle blijft onaangeroerd.")
+    d1, d2 = st.columns(2)
+    d1.download_button("⬇︎ Indeling, alle groepen (CSV)", a.to_csv(index=False), "indeling.csv", "text/csv",
+                       width="stretch", help="Url, groep, stratum en pre-cijfers. Input voor stap 2.")
     d2.download_button("⬇︎ Testconfig (JSON)", dio.dump_config(config), "testconfig.json", "application/json",
-                       use_container_width=True, help="Bewaar deze bij de test: stap 2 vult hiermee alle filters in.")
-    tests = "\n".join(f"{g}\t{u}" for g, u in a.loc[a["groep"] != cfg.group_names[0], ["groep", "url"]].itertuples(index=False))
-    d3.download_button("⬇︎ Url's testgroep(en) (TSV)", "groep\turl\n" + tests, "testgroep_urls.tsv", "text/tab-separated-values",
-                       use_container_width=True)
-    for g in cfg.group_names[1:]:
+                       width="stretch", help="Alle filters en instellingen. Stap 2 vult hiermee alles in.")
+    cols = st.columns(len(cfg.group_names))
+    for col, g in zip(cols, cfg.group_names):
+        urls = a.loc[a["groep"] == g, "url"]
+        rol = "niet wijzigen" if g == cfg.group_names[0] else "wijziging doorvoeren"
+        col.download_button(f"⬇︎ {g} ({nl(len(urls))} url's)", "\n".join(urls) + "\n", f"urls_{g}.txt", "text/plain",
+                            width="stretch", help=f"Eén url per regel; {rol}.")
+    for g in cfg.group_names:
         with st.expander(f"Url's {g} kopiëren ({nl((a['groep'] == g).sum())})"):
             st.code("\n".join(a.loc[a["groep"] == g, "url"]), language=None)
 
@@ -455,7 +461,7 @@ def step_analysis() -> None:
     st.caption(" · ".join(f"{g}: {nl((assignments['groep'] == g).sum())} url's" for g in groups))
 
     st.subheader("Data")
-    source = st.radio("Bron", ["BigQuery (query + plakken)", "GSC API (serviceaccount)", "Eigen CSV", "Demodata"],
+    source = st.radio("Bron", ["BigQuery (query + plakken)", "GSC API", "Eigen CSV", "Demodata"],
                       horizontal=True, key="a_source")
     defaults = default_filters(cfg, analysis=True)
     if source.startswith("BigQuery"):
@@ -535,12 +541,12 @@ def step_analysis() -> None:
         alpha = st.select_slider("α", [0.01, 0.05, 0.10], value=0.05)
         do_placebo = st.checkbox("Placebotest in de pre-periode", True)
 
-    st.line_chart(wide[[treated, *controls]], use_container_width=True)
+    st.line_chart(wide[[treated, *controls]], width="stretch")
 
     if not controls:
         st.warning("Kies minstens één controlereeks.")
         return
-    if st.button("▶︎ Analyse draaien", type="primary", use_container_width=True):
+    if st.button("▶︎ Analyse draaien", type="primary", width="stretch"):
         data = wide[[treated, *controls]]
         try:
             with st.spinner("Model draait…"):
@@ -619,7 +625,7 @@ def show_impact(res: im.ImpactResult, pl: im.ImpactResult | None, treated: str, 
                 help=f"Gemiddelde afwijking (MAPE) {nl_pct(res.pre_fit.get('mape', np.nan), sign=False)}")
 
     fig = im.plot_impact(res, label)
-    st.pyplot(fig, use_container_width=True)
+    st.pyplot(fig, width="stretch")
 
     if pl is not None:
         pk = pl.kpis
@@ -629,17 +635,17 @@ def show_impact(res: im.ImpactResult, pl: im.ImpactResult | None, treated: str, 
             + ("❌ slaat aan" if pk["significant"] else "✅ niets gevonden, zoals het hoort")
         )
         with st.expander("Placebografiek"):
-            st.pyplot(im.plot_impact(pl, label, title="Placebo: nepdatum in de pre-periode"), use_container_width=True)
+            st.pyplot(im.plot_impact(pl, label, title="Placebo: nepdatum in de pre-periode"), width="stretch")
 
     png = io.BytesIO()
     fig.savefig(png, format="png", dpi=150, bbox_inches="tight")
     out = {**k, "testgroep": treated, "metric": metric, "pre_fit": res.pre_fit,
            "placebo": pl.kpis if pl is not None else None}
     d1, d2, d3 = st.columns(3)
-    d1.download_button("⬇︎ Grafiek (PNG)", png.getvalue(), "causal_impact.png", "image/png", use_container_width=True)
+    d1.download_button("⬇︎ Grafiek (PNG)", png.getvalue(), "causal_impact.png", "image/png", width="stretch")
     d2.download_button("⬇︎ KPI's (JSON)", json.dumps(out, indent=2, default=float), "causal_impact_kpis.json",
-                       "application/json", use_container_width=True)
-    d3.download_button("⬇︎ Reeksen (CSV)", res.frame.to_csv(), "causal_impact_reeksen.csv", "text/csv", use_container_width=True)
+                       "application/json", width="stretch")
+    d3.download_button("⬇︎ Reeksen (CSV)", res.frame.to_csv(), "causal_impact_reeksen.csv", "text/csv", width="stretch")
 
 
 # =============================================================================
